@@ -69,25 +69,35 @@ def require_api_key(f):
 
 
 def verify_shipday_webhook(f):
-    """Decorator to verify Shipday webhook signatures."""
+    """Decorator to verify Shipday webhook token from multiple headers."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not SHIPDAY_WEBHOOK_SECRET:
             logger.warning("Webhook secret not configured, skipping verification")
             return f(*args, **kwargs)
 
-        signature = request.headers.get("X-Shipday-Signature", "")
-        payload = request.get_data()
+        # Check multiple headers for the webhook token
+        webhook_token = request.headers.get("X-Webhook-Token", "")
+        shipday_signature = request.headers.get("X-Shipday-Signature", "")
+        auth_header = request.headers.get("Authorization", "")
 
-        expected = hmac.new(
-            SHIPDAY_WEBHOOK_SECRET.encode(),
-            payload,
-            hashlib.sha256
-        ).hexdigest()
+        # Extract token from Authorization header (Bearer token or raw)
+        auth_token = ""
+        if auth_header.startswith("Bearer "):
+            auth_token = auth_header[7:]
+        else:
+            auth_token = auth_header
 
-        if not hmac.compare_digest(signature, expected):
-            logger.warning("Invalid webhook signature received")
-            return jsonify({"error": "Invalid signature"}), 401
+        # Check if any of the provided tokens match the secret
+        provided_tokens = [webhook_token, shipday_signature, auth_token]
+        token_valid = any(
+            token and hmac.compare_digest(token, SHIPDAY_WEBHOOK_SECRET)
+            for token in provided_tokens
+        )
+
+        if not token_valid:
+            logger.warning("Invalid webhook token received")
+            return jsonify({"error": "Unauthorized", "message": "Invalid or missing webhook token"}), 401
 
         return f(*args, **kwargs)
     return decorated
