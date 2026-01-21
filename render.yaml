@@ -1,0 +1,44 @@
+# Render Blueprint Configuration
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: avs-shipday-integration
+    runtime: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn flask_service_enhanced:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --worker-class gthread
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: SHIPDAY_API_KEY
+        sync: false
+      - key: API_KEY
+        generateValue: true
+      - key: SHIPDAY_WEBHOOK_SECRET
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: FLASK_DEBUG
+        value: "false"
+    autoDeploy: true
+    branch: main
+
+# Background worker for async tasks (optional)
+# Uncomment if you need background processing
+#  - type: worker
+#    name: avs-shipday-worker
+#    runtime: python
+#    buildCommand: pip install -r requirements.txt
+#    startCommand: python worker.py
+#    envVars:
+#      - key: PYTHON_VERSION
+#        value: 3.11.0
+#      - key: GOOGLE_MAPS_API_KEY
+#        sync: false
+#      - key: SHIPDAY_API_KEY
+#        sync: false
