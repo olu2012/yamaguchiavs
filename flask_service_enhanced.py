@@ -163,6 +163,7 @@ def root():
         "endpoints": {
             "health": "/health",
             "verify_address": "/api/v1/verify-address",
+            "vendor_address_verification": "/vendor/address-verification/submit",
             "create_order": "/api/v1/orders",
             "get_order": "/api/v1/orders/<order_id>",
             "complete_delivery": "/api/v1/orders/<order_id>/complete",
@@ -263,6 +264,105 @@ def verify_addresses_batch():
             "count": len(results),
             "results": results
         })
+
+    except ValueError as e:
+        return jsonify({"error": "Configuration Error", "message": str(e)}), 500
+
+
+@app.route("/vendor/address-verification/submit", methods=["POST"])
+@require_api_key
+def vendor_address_verification_submit():
+    """
+    Submit address verification requests from a vendor.
+
+    Request Body:
+        {
+            "vendorId": "9773FC2D-8DC2-40E6-B272-71AC04719FBD",
+            "addressVerificationRequests": [
+                {
+                    "activityId": "7e44c8ed-e04a-48a2-9274-c2ba3c4171f6",
+                    "customerName": "John Doe",
+                    "address": "123 Main Street, Lagos",
+                    "visitDate": "2025-01-25T10:00:00Z"
+                }
+            ]
+        }
+
+    Returns:
+        Verification results for each address request.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Bad Request", "message": "Request body is required"}), 400
+
+    # Validate required fields
+    if "vendorId" not in data:
+        return jsonify({"error": "Bad Request", "message": "vendorId is required"}), 400
+
+    if "addressVerificationRequests" not in data:
+        return jsonify({"error": "Bad Request", "message": "addressVerificationRequests is required"}), 400
+
+    vendor_id = data["vendorId"]
+    requests_list = data["addressVerificationRequests"]
+
+    if not isinstance(requests_list, list) or len(requests_list) == 0:
+        return jsonify({"error": "Bad Request", "message": "addressVerificationRequests must be a non-empty array"}), 400
+
+    if len(requests_list) > 100:
+        return jsonify({"error": "Bad Request", "message": "Maximum 100 address verification requests per submission"}), 400
+
+    try:
+        avs = get_avs_client()
+        results = []
+
+        for req in requests_list:
+            # Validate each request has required fields
+            if "activityId" not in req:
+                results.append({
+                    "activityId": None,
+                    "success": False,
+                    "error": "activityId is required"
+                })
+                continue
+
+            if "address" not in req:
+                results.append({
+                    "activityId": req["activityId"],
+                    "success": False,
+                    "error": "address is required"
+                })
+                continue
+
+            # Verify the address
+            result = avs.verify_address(req["address"])
+
+            verification_result = {
+                "activityId": req["activityId"],
+                "customerName": req.get("customerName"),
+                "visitDate": req.get("visitDate"),
+                "originalAddress": req["address"],
+                "success": result.is_valid,
+                "confidenceScore": result.confidence_score
+            }
+
+            if result.is_valid and result.verified_address:
+                verification_result["verifiedAddress"] = result.verified_address.to_dict()
+                verification_result["formattedAddress"] = result.verified_address.format_full()
+            else:
+                verification_result["error"] = result.error_message
+                if result.suggestions:
+                    verification_result["suggestions"] = result.suggestions
+
+            results.append(verification_result)
+
+        return jsonify({
+            "success": True,
+            "vendorId": vendor_id,
+            "totalRequests": len(requests_list),
+            "successfulVerifications": sum(1 for r in results if r.get("success")),
+            "failedVerifications": sum(1 for r in results if not r.get("success")),
+            "results": results
+        }), 200
 
     except ValueError as e:
         return jsonify({"error": "Configuration Error", "message": str(e)}), 500
