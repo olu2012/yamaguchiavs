@@ -16,6 +16,7 @@ from typing import Optional, Dict, Any
 from flask import Flask, request, jsonify, abort
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
+from flasgger import Swagger, swag_from
 
 from avs_shipday_integration import (
     AVSClient, ShipdayClient, AVSShipdayIntegration,
@@ -38,6 +39,57 @@ app.config.update(
     JSON_SORT_KEYS=False,
     MAX_CONTENT_LENGTH=16 * 1024 * 1024  # 16MB max for photo uploads
 )
+
+# Swagger configuration
+swagger_config = {
+    "headers": [],
+    "specs": [
+        {
+            "endpoint": "apispec",
+            "route": "/apispec.json",
+            "rule_filter": lambda rule: True,
+            "model_filter": lambda tag: True,
+        }
+    ],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/docs"
+}
+
+swagger_template = {
+    "swagger": "2.0",
+    "info": {
+        "title": "AVS-Shipday Integration API",
+        "description": "REST API for address verification and delivery management with Shipday integration.",
+        "version": "1.0.0",
+        "contact": {
+            "name": "API Support"
+        }
+    },
+    "securityDefinitions": {
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+            "description": "API key for authentication"
+        },
+        "BearerAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "Authorization",
+            "description": "Bearer token (format: Bearer <api_key>)"
+        }
+    },
+    "tags": [
+        {"name": "Health", "description": "Health check endpoints"},
+        {"name": "Address Verification", "description": "Address verification endpoints"},
+        {"name": "Vendor", "description": "Vendor address verification endpoints"},
+        {"name": "Orders", "description": "Order management endpoints"},
+        {"name": "Webhooks", "description": "Webhook handlers"}
+    ]
+}
+
+swagger = Swagger(app, config=swagger_config, template=swagger_template)
 
 # API key for authentication
 API_KEY = os.getenv("API_KEY")
@@ -146,7 +198,26 @@ def get_integration() -> AVSShipdayIntegration:
 # Health check endpoint
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint for load balancers."""
+    """Health check endpoint for load balancers.
+    ---
+    tags:
+      - Health
+    responses:
+      200:
+        description: Service is healthy
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: healthy
+            timestamp:
+              type: string
+              example: "2025-01-25T10:00:00"
+            service:
+              type: string
+              example: avs-shipday-integration
+    """
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
@@ -177,16 +248,62 @@ def root():
 @app.route("/api/v1/verify-address", methods=["POST"])
 @require_api_key
 def verify_address():
-    """
-    Verify and standardize a delivery address.
-
-    Request Body:
-        {
-            "address": "123 Main St, City, State 12345"
-        }
-
-    Returns:
-        Verification result with standardized address and confidence score.
+    """Verify and standardize a delivery address.
+    ---
+    tags:
+      - Address Verification
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - address
+          properties:
+            address:
+              type: string
+              example: "123 Main St, City, State 12345"
+    responses:
+      200:
+        description: Address verification result
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            original_address:
+              type: string
+            confidence_score:
+              type: number
+            verified_address:
+              type: object
+              properties:
+                street:
+                  type: string
+                city:
+                  type: string
+                state:
+                  type: string
+                zip_code:
+                  type: string
+                country:
+                  type: string
+                latitude:
+                  type: number
+                longitude:
+                  type: number
+            formatted_address:
+              type: string
+      400:
+        description: Bad request - address is required
+      401:
+        description: Unauthorized - invalid or missing API key
+      500:
+        description: Configuration error
     """
     data = request.get_json()
     if not data or "address" not in data:
@@ -223,16 +340,58 @@ def verify_address():
 @app.route("/api/v1/verify-address/batch", methods=["POST"])
 @require_api_key
 def verify_addresses_batch():
-    """
-    Verify multiple addresses in a single request.
-
-    Request Body:
-        {
-            "addresses": ["address1", "address2", ...]
-        }
-
-    Returns:
-        Array of verification results.
+    """Verify multiple addresses in a single request.
+    ---
+    tags:
+      - Address Verification
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - addresses
+          properties:
+            addresses:
+              type: array
+              items:
+                type: string
+              example: ["123 Main St, City, State 12345", "456 Oak Ave, Town, State 67890"]
+    responses:
+      200:
+        description: Batch verification results
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            count:
+              type: integer
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  original:
+                    type: string
+                  is_valid:
+                    type: boolean
+                  confidence_score:
+                    type: number
+                  verified_address:
+                    type: object
+                  error:
+                    type: string
+      400:
+        description: Bad request - addresses array is required
+      401:
+        description: Unauthorized - invalid or missing API key
+      500:
+        description: Configuration error
     """
     data = request.get_json()
     if not data or "addresses" not in data:
@@ -272,24 +431,98 @@ def verify_addresses_batch():
 @app.route("/vendor/address-verification/submit", methods=["POST"])
 @require_api_key
 def vendor_address_verification_submit():
-    """
-    Submit address verification requests from a vendor.
-
-    Request Body:
-        {
-            "vendorId": "9773FC2D-8DC2-40E6-B272-71AC04719FBD",
-            "addressVerificationRequests": [
-                {
-                    "activityId": "7e44c8ed-e04a-48a2-9274-c2ba3c4171f6",
-                    "customerName": "John Doe",
-                    "address": "123 Main Street, Lagos",
-                    "visitDate": "2025-01-25T10:00:00Z"
-                }
-            ]
-        }
-
-    Returns:
-        Verification results for each address request.
+    """Submit address verification requests from a vendor.
+    ---
+    tags:
+      - Vendor
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - vendorId
+            - addressVerificationRequests
+          properties:
+            vendorId:
+              type: string
+              format: uuid
+              example: "9773FC2D-8DC2-40E6-B272-71AC04719FBD"
+            addressVerificationRequests:
+              type: array
+              items:
+                type: object
+                required:
+                  - activityId
+                  - address
+                properties:
+                  activityId:
+                    type: string
+                    format: uuid
+                    example: "7e44c8ed-e04a-48a2-9274-c2ba3c4171f6"
+                  customerName:
+                    type: string
+                    example: "John Doe"
+                  address:
+                    type: string
+                    example: "123 Main Street, Lagos"
+                  visitDate:
+                    type: string
+                    format: date-time
+                    example: "2025-01-25T10:00:00Z"
+    responses:
+      200:
+        description: Verification results for all submitted addresses
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            vendorId:
+              type: string
+            totalRequests:
+              type: integer
+            successfulVerifications:
+              type: integer
+            failedVerifications:
+              type: integer
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  activityId:
+                    type: string
+                  customerName:
+                    type: string
+                  visitDate:
+                    type: string
+                  originalAddress:
+                    type: string
+                  success:
+                    type: boolean
+                  confidenceScore:
+                    type: number
+                  verifiedAddress:
+                    type: object
+                  formattedAddress:
+                    type: string
+                  error:
+                    type: string
+                  suggestions:
+                    type: array
+                    items:
+                      type: string
+      400:
+        description: Bad request - missing required fields
+      401:
+        description: Unauthorized - invalid or missing API key
+      500:
+        description: Configuration error
     """
     data = request.get_json()
     if not data:
@@ -372,26 +605,71 @@ def vendor_address_verification_submit():
 @app.route("/api/v1/orders", methods=["POST"])
 @require_api_key
 def create_order():
-    """
-    Create a new delivery order with address verification.
-
-    Request Body:
-        {
-            "order_number": "ORD-12345",
-            "customer": {
-                "name": "John Doe",
-                "phone": "+1234567890",
-                "email": "john@example.com"
-            },
-            "delivery_address": "123 Main St, City, State 12345",
-            "items": [
-                {"name": "Item 1", "quantity": 1, "price": 10.00}
-            ],
-            "special_instructions": "Leave at door"
-        }
-
-    Returns:
-        Order creation result with verification details.
+    """Create a new delivery order with address verification.
+    ---
+    tags:
+      - Orders
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - order_number
+            - customer
+            - delivery_address
+            - items
+          properties:
+            order_number:
+              type: string
+              example: "ORD-12345"
+            customer:
+              type: object
+              required:
+                - name
+                - phone
+                - email
+              properties:
+                name:
+                  type: string
+                  example: "John Doe"
+                phone:
+                  type: string
+                  example: "+1234567890"
+                email:
+                  type: string
+                  example: "john@example.com"
+            delivery_address:
+              type: string
+              example: "123 Main St, City, State 12345"
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  quantity:
+                    type: integer
+                  price:
+                    type: number
+              example: [{"name": "Item 1", "quantity": 1, "price": 10.00}]
+            special_instructions:
+              type: string
+              example: "Leave at door"
+    responses:
+      201:
+        description: Order created successfully
+      400:
+        description: Bad request or address verification failed
+      401:
+        description: Unauthorized - invalid or missing API key
+      500:
+        description: Configuration error
     """
     data = request.get_json()
     if not data:
@@ -435,7 +713,29 @@ def create_order():
 @app.route("/api/v1/orders/<order_id>", methods=["GET"])
 @require_api_key
 def get_order(order_id: str):
-    """Get order details and status."""
+    """Get order details and status.
+    ---
+    tags:
+      - Orders
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: order_id
+        type: string
+        required: true
+        description: The order ID
+    responses:
+      200:
+        description: Order details
+      401:
+        description: Unauthorized - invalid or missing API key
+      404:
+        description: Order not found
+      500:
+        description: Configuration error
+    """
     try:
         shipday = get_shipday_client()
         result = shipday.get_order_status(order_id)
@@ -452,14 +752,43 @@ def get_order(order_id: str):
 @app.route("/api/v1/orders/<order_id>/status", methods=["PUT"])
 @require_api_key
 def update_order_status(order_id: str):
-    """
-    Update order status.
-
-    Request Body:
-        {
-            "status": "DELIVERED",
-            "notes": "Left at front door"
-        }
+    """Update order status.
+    ---
+    tags:
+      - Orders
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: order_id
+        type: string
+        required: true
+        description: The order ID
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - status
+          properties:
+            status:
+              type: string
+              enum: [PENDING, ASSIGNED, PICKED_UP, EN_ROUTE, DELIVERED, CANCELLED]
+              example: "DELIVERED"
+            notes:
+              type: string
+              example: "Left at front door"
+    responses:
+      200:
+        description: Order status updated
+      400:
+        description: Bad request - invalid status
+      401:
+        description: Unauthorized - invalid or missing API key
+      500:
+        description: Configuration error
     """
     data = request.get_json()
     if not data or "status" not in data:
@@ -493,16 +822,45 @@ def update_order_status(order_id: str):
 @app.route("/api/v1/orders/<order_id>/photos", methods=["POST"])
 @require_api_key
 def upload_photo(order_id: str):
-    """
-    Upload a delivery photo.
-
-    Request Body:
-        {
-            "photo_url": "https://storage.example.com/photo.jpg",
-            "photo_type": "proof_of_delivery"
-        }
-
-    Photo types: proof_of_delivery, signature, package, location
+    """Upload a delivery photo.
+    ---
+    tags:
+      - Orders
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: order_id
+        type: string
+        required: true
+        description: The order ID
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - photo_url
+          properties:
+            photo_url:
+              type: string
+              format: uri
+              example: "https://storage.example.com/photo.jpg"
+            photo_type:
+              type: string
+              enum: [proof_of_delivery, signature, package, location]
+              default: proof_of_delivery
+              example: "proof_of_delivery"
+    responses:
+      200:
+        description: Photo uploaded successfully
+      400:
+        description: Bad request - invalid photo type or missing URL
+      401:
+        description: Unauthorized - invalid or missing API key
+      500:
+        description: Configuration error
     """
     data = request.get_json()
     if not data or "photo_url" not in data:
@@ -541,15 +899,47 @@ def upload_photo(order_id: str):
 @app.route("/api/v1/orders/<order_id>/complete", methods=["POST"])
 @require_api_key
 def complete_delivery(order_id: str):
-    """
-    Mark delivery as complete with proof photos.
-
-    Request Body:
-        {
-            "photo_url": "https://storage.example.com/delivery-proof.jpg",
-            "signature_url": "https://storage.example.com/signature.jpg",
-            "notes": "Delivered to customer"
-        }
+    """Mark delivery as complete with proof photos.
+    ---
+    tags:
+      - Orders
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: order_id
+        type: string
+        required: true
+        description: The order ID
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - photo_url
+          properties:
+            photo_url:
+              type: string
+              format: uri
+              example: "https://storage.example.com/delivery-proof.jpg"
+            signature_url:
+              type: string
+              format: uri
+              example: "https://storage.example.com/signature.jpg"
+            notes:
+              type: string
+              example: "Delivered to customer"
+    responses:
+      200:
+        description: Delivery completed successfully
+      400:
+        description: Bad request or completion failed
+      401:
+        description: Unauthorized - invalid or missing API key
+      500:
+        description: Configuration error
     """
     data = request.get_json()
     if not data or "photo_url" not in data:
@@ -575,15 +965,49 @@ def complete_delivery(order_id: str):
 @app.route("/webhooks/shipday", methods=["POST"])
 @verify_shipday_webhook
 def shipday_webhook():
-    """
-    Handle Shipday webhook events.
-
-    Events handled:
-    - order.status.changed
-    - order.assigned
-    - order.picked_up
-    - order.delivered
-    - carrier.location.updated
+    """Handle Shipday webhook events.
+    ---
+    tags:
+      - Webhooks
+    parameters:
+      - in: header
+        name: X-Webhook-Token
+        type: string
+        description: Webhook verification token
+      - in: header
+        name: X-Shipday-Signature
+        type: string
+        description: Alternative Shipday signature header
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          properties:
+            event:
+              type: string
+              enum: [order.status.changed, order.assigned, order.picked_up, order.delivered, carrier.location.updated]
+              example: "order.status.changed"
+            orderId:
+              type: string
+              example: "12345"
+            newStatus:
+              type: string
+            oldStatus:
+              type: string
+            carrier:
+              type: object
+            timestamp:
+              type: string
+    responses:
+      200:
+        description: Webhook processed successfully
+      400:
+        description: Bad request - no payload
+      401:
+        description: Unauthorized - invalid webhook token
+      500:
+        description: Processing error
     """
     data = request.get_json()
     if not data:
