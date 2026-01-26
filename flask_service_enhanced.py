@@ -621,7 +621,7 @@ def vendor_address_verification_submit():
         return jsonify({
             "status": "pending",
             "message": "Address verification request submitted successfully",
-            "reference": verification_reference
+            "reference": customer_reference
         }), 200
 
     except Exception as e:
