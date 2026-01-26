@@ -431,7 +431,7 @@ def verify_addresses_batch():
 @app.route("/vendor/address-verification/submit", methods=["POST"])
 @require_api_key
 def vendor_address_verification_submit():
-    """Submit address verification requests from a vendor.
+    """Submit an address verification request.
     ---
     tags:
       - Vendor
@@ -445,78 +445,94 @@ def vendor_address_verification_submit():
         schema:
           type: object
           required:
-            - vendorId
-            - addressVerificationRequests
+            - customer_reference
+            - subject_first_name
+            - subject_last_name
+            - address_street
+            - address_city
+            - address_state
+            - address_country
           properties:
-            vendorId:
+            customer_reference:
               type: string
-              format: uuid
-              example: "9773FC2D-8DC2-40E6-B272-71AC04719FBD"
-            addressVerificationRequests:
-              type: array
-              items:
-                type: object
-                required:
-                  - activityId
-                  - address
-                properties:
-                  activityId:
-                    type: string
-                    format: uuid
-                    example: "7e44c8ed-e04a-48a2-9274-c2ba3c4171f6"
-                  customerName:
-                    type: string
-                    example: "John Doe"
-                  address:
-                    type: string
-                    example: "123 Main Street, Lagos"
-                  visitDate:
-                    type: string
-                    format: date-time
-                    example: "2025-01-25T10:00:00Z"
+              description: Unique reference for the customer/request
+              example: "CUST-12345"
+            verification_type:
+              type: string
+              description: Type of verification
+              default: "physical_address"
+              example: "physical_address"
+            subject_first_name:
+              type: string
+              description: First name of the subject
+              example: "John"
+            subject_last_name:
+              type: string
+              description: Last name of the subject
+              example: "Doe"
+            subject_middle_name:
+              type: string
+              description: Middle name of the subject
+              example: "Michael"
+            subject_email:
+              type: string
+              format: email
+              description: Email address of the subject
+              example: "john.doe@example.com"
+            subject_phone:
+              type: string
+              description: Phone number of the subject
+              example: "+2348012345678"
+            subject_date_of_birth:
+              type: string
+              description: Date of birth of the subject
+              example: "1990-01-15"
+            address_street:
+              type: string
+              description: Street address
+              example: "123 Main Street"
+            address_city:
+              type: string
+              description: City
+              example: "Lagos"
+            address_state:
+              type: string
+              description: State
+              example: "Lagos"
+            address_lga:
+              type: string
+              description: Local Government Area
+              example: "Ikeja"
+            address_landmark:
+              type: string
+              description: Nearby landmark
+              example: "Near Central Mosque"
+            address_postal_code:
+              type: string
+              description: Postal code
+              example: "100001"
+            address_country:
+              type: string
+              description: Country
+              example: "Nigeria"
     responses:
       200:
-        description: Verification results for all submitted addresses
+        description: Address verification request submitted successfully
         schema:
           type: object
           properties:
-            success:
-              type: boolean
-            vendorId:
+            status:
               type: string
-            totalRequests:
-              type: integer
-            successfulVerifications:
-              type: integer
-            failedVerifications:
-              type: integer
-            results:
-              type: array
-              items:
-                type: object
-                properties:
-                  activityId:
-                    type: string
-                  customerName:
-                    type: string
-                  visitDate:
-                    type: string
-                  originalAddress:
-                    type: string
-                  success:
-                    type: boolean
-                  confidenceScore:
-                    type: number
-                  verifiedAddress:
-                    type: object
-                  formattedAddress:
-                    type: string
-                  error:
-                    type: string
-                  suggestions:
-                    type: array
-                    items:
-                      type: string
+              description: Status of the request
+              example: "pending"
+            message:
+              type: string
+              description: Response message
+              example: "Address verification request submitted successfully"
+            reference:
+              type: string
+              description: Reference ID for tracking the verification
+              example: "AVS-2025-0001"
       400:
         description: Bad request - missing required fields
       401:
@@ -524,81 +540,97 @@ def vendor_address_verification_submit():
       500:
         description: Configuration error
     """
+    import uuid
+
     data = request.get_json()
     if not data:
-        return jsonify({"error": "Bad Request", "message": "Request body is required"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "Request body is required",
+            "reference": ""
+        }), 400
 
     # Validate required fields
-    if "vendorId" not in data:
-        return jsonify({"error": "Bad Request", "message": "vendorId is required"}), 400
+    required_fields = [
+        "customer_reference",
+        "subject_first_name",
+        "subject_last_name",
+        "address_street",
+        "address_city",
+        "address_state",
+        "address_country"
+    ]
 
-    if "addressVerificationRequests" not in data:
-        return jsonify({"error": "Bad Request", "message": "addressVerificationRequests is required"}), 400
+    missing_fields = [field for field in required_fields if not data.get(field)]
+    if missing_fields:
+        return jsonify({
+            "status": "error",
+            "message": f"Missing required fields: {', '.join(missing_fields)}",
+            "reference": ""
+        }), 400
 
-    vendor_id = data["vendorId"]
-    requests_list = data["addressVerificationRequests"]
+    # Extract address fields
+    customer_reference = data.get("customer_reference", "")
+    verification_type = data.get("verification_type", "physical_address")
 
-    if not isinstance(requests_list, list) or len(requests_list) == 0:
-        return jsonify({"error": "Bad Request", "message": "addressVerificationRequests must be a non-empty array"}), 400
+    # Subject information
+    subject_info = {
+        "first_name": data.get("subject_first_name", ""),
+        "last_name": data.get("subject_last_name", ""),
+        "middle_name": data.get("subject_middle_name", ""),
+        "email": data.get("subject_email", ""),
+        "phone": data.get("subject_phone", ""),
+        "date_of_birth": data.get("subject_date_of_birth", "")
+    }
 
-    if len(requests_list) > 100:
-        return jsonify({"error": "Bad Request", "message": "Maximum 100 address verification requests per submission"}), 400
+    # Address information
+    address_info = {
+        "street": data.get("address_street", ""),
+        "city": data.get("address_city", ""),
+        "state": data.get("address_state", ""),
+        "lga": data.get("address_lga", ""),
+        "landmark": data.get("address_landmark", ""),
+        "postal_code": data.get("address_postal_code", ""),
+        "country": data.get("address_country", "")
+    }
+
+    # Build full address string for verification
+    address_parts = [
+        address_info["street"],
+        address_info["lga"],
+        address_info["city"],
+        address_info["state"],
+        address_info["postal_code"],
+        address_info["country"]
+    ]
+    full_address = ", ".join(part for part in address_parts if part)
+
+    # Generate a unique reference for this verification request
+    verification_reference = f"AVS-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:8].upper()}"
 
     try:
-        avs = get_avs_client()
-        results = []
+        # Log the verification request
+        logger.info(f"Address verification request received: {verification_reference}")
+        logger.info(f"Customer reference: {customer_reference}")
+        logger.info(f"Subject: {subject_info['first_name']} {subject_info['last_name']}")
+        logger.info(f"Address: {full_address}")
 
-        for req in requests_list:
-            # Validate each request has required fields
-            if "activityId" not in req:
-                results.append({
-                    "activityId": None,
-                    "success": False,
-                    "error": "activityId is required"
-                })
-                continue
-
-            if "address" not in req:
-                results.append({
-                    "activityId": req["activityId"],
-                    "success": False,
-                    "error": "address is required"
-                })
-                continue
-
-            # Verify the address
-            result = avs.verify_address(req["address"])
-
-            verification_result = {
-                "activityId": req["activityId"],
-                "customerName": req.get("customerName"),
-                "visitDate": req.get("visitDate"),
-                "originalAddress": req["address"],
-                "success": result.is_valid,
-                "confidenceScore": result.confidence_score
-            }
-
-            if result.is_valid and result.verified_address:
-                verification_result["verifiedAddress"] = result.verified_address.to_dict()
-                verification_result["formattedAddress"] = result.verified_address.format_full()
-            else:
-                verification_result["error"] = result.error_message
-                if result.suggestions:
-                    verification_result["suggestions"] = result.suggestions
-
-            results.append(verification_result)
+        # TODO: Integrate with actual address verification service
+        # For now, we acknowledge receipt and return pending status
 
         return jsonify({
-            "success": True,
-            "vendorId": vendor_id,
-            "totalRequests": len(requests_list),
-            "successfulVerifications": sum(1 for r in results if r.get("success")),
-            "failedVerifications": sum(1 for r in results if not r.get("success")),
-            "results": results
+            "status": "pending",
+            "message": "Address verification request submitted successfully",
+            "reference": verification_reference
         }), 200
 
-    except ValueError as e:
-        return jsonify({"error": "Configuration Error", "message": str(e)}), 500
+    except Exception as e:
+        logger.exception(f"Error processing address verification request: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": "An error occurred while processing the request",
+            "reference": ""
+        }), 500
 
 
 # Order Management Endpoints
