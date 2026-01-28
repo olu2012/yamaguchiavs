@@ -1041,17 +1041,15 @@ def test_shipday():
         shipday_api_key = SHIPDAY_API_KEY
         shipday_url = "https://api.shipday.com/orders"
 
-        # Shipday API requires specific format
-        # See: https://docs.shipday.com/reference/insert-new-order
+        # Shipday API requires restaurant name for pickup location
         test_payload = {
             "orderNumber": "AVS-TEST-" + datetime.utcnow().strftime("%Y%m%d%H%M%S"),
             "customerName": "Test Customer",
             "customerAddress": "123 Test Street, Lagos, Nigeria",
             "customerPhoneNumber": "08012345678",
-            "restaurant": {
-                "name": "AVS Verification Service",
-                "address": "Lagos, Nigeria"
-            }
+            "restaurantName": "AVS Verification HQ",
+            "restaurantAddress": "Victoria Island, Lagos, Nigeria",
+            "restaurantPhoneNumber": "08000000000"
         }
 
         # Try multiple auth methods
