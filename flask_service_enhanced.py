@@ -1020,6 +1020,52 @@ def debug_config():
     })
 
 
+@app.route("/api/v1/debug/test-shipday", methods=["POST"])
+@require_api_key
+def test_shipday():
+    """Test Shipday order creation directly.
+    ---
+    tags:
+      - AVS Integration
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    responses:
+      200:
+        description: Shipday test result
+    """
+    try:
+        integration = get_integration()
+
+        # Test payload
+        test_request = {
+            "activityId": "SHIPDAY-TEST-001",
+            "customerName": "Test Customer",
+            "address": "123 Test Street, Lagos, Nigeria",
+            "visitDate": "2026-01-29T10:00:00Z",
+            "additionalComments": "Test order"
+        }
+
+        result = integration._create_shipday_order(test_request)
+
+        if result:
+            return jsonify({
+                "success": True,
+                "message": "Shipday order created",
+                "order": result
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "Failed to create Shipday order - check logs"
+            })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route("/api/v1/verification-statuses", methods=["GET"])
 def get_verification_statuses():
     """Get list of valid verification statuses.

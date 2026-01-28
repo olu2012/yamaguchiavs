@@ -153,11 +153,18 @@ class AVSShipdayIntegration:
                 "Content-Type": "application/json"
             }
 
+            shipday_url = f"{self.shipday_base_url}/orders"
+            print(f"[Shipday] Creating order at: {shipday_url}")
+            print(f"[Shipday] Payload: {json.dumps(shipday_payload)[:500]}")
+
             response = requests.post(
-                f"{self.shipday_base_url}/orders",
+                shipday_url,
                 headers=headers,
                 json=shipday_payload
             )
+
+            print(f"[Shipday] Response Status: {response.status_code}")
+            print(f"[Shipday] Response Body: {response.text[:500] if response.text else 'empty'}")
 
             if response.status_code in [200, 201]:
                 return response.json()
