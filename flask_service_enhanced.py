@@ -103,8 +103,9 @@ def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not API_KEY:
-            # API key not configured, skip authentication
-            return f(*args, **kwargs)
+            # API key not configured - reject all requests
+            logger.error("API_KEY environment variable is not set. All authenticated requests will be rejected.")
+            return jsonify({"error": "Service Misconfigured", "message": "API authentication is not configured"}), 503
 
         auth_header = request.headers.get("Authorization", "")
         api_key_header = request.headers.get("X-API-Key", "")
@@ -1009,14 +1010,14 @@ def debug_config():
         description: Current configuration
     """
     return jsonify({
+        "api_key_set": bool(API_KEY),
         "avs_base_url": AVS_BASE_URL,
         "avs_vendor_id_set": bool(AVS_VENDOR_ID),
         "avs_vendor_id_preview": AVS_VENDOR_ID[:8] + "..." if AVS_VENDOR_ID and len(AVS_VENDOR_ID) > 8 else "not set",
         "avs_subscription_key_set": bool(AVS_SUBSCRIPTION_KEY),
         "avs_subscription_key_preview": AVS_SUBSCRIPTION_KEY[:8] + "..." if AVS_SUBSCRIPTION_KEY and len(AVS_SUBSCRIPTION_KEY) > 8 else "not set",
         "shipday_api_key_set": bool(SHIPDAY_API_KEY),
-        "full_avs_endpoint": f"{AVS_BASE_URL}/api/AddressVendor/receive-verification-response",
-        "expected_dev_key_starts_with": "b9640d4b"
+        "full_avs_endpoint": f"{AVS_BASE_URL}/api/AddressVendor/receive-verification-response"
     })
 
 
