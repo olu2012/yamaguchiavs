@@ -188,10 +188,11 @@ class AVSShipdayIntegration:
         """
         try:
             # Construct AVS response payload - wrapped in 'request' as required by AVS API
+            # Note: Field names are PascalCase as required by AVS
             avs_payload = {
                 "request": {
-                    "vendorId": self.avs_vendor_id,
-                    "addressVerificationResponses": [
+                    "VendorId": self.avs_vendor_id,
+                    "AddressVerificationResponses": [
                         self._build_avs_response(activity_id, shipday_order_data, verification_details)
                     ]
                 }
@@ -263,19 +264,19 @@ class AVSShipdayIntegration:
         Returns:
             Formatted AVS response object
         """
-        # Extract media from verification details
+        # Extract media from verification details - using PascalCase for AVS API
         address_media = []
         if 'photos' in verification_details:
             for photo in verification_details['photos']:
                 address_media.append({
-                    "fileName": photo.get('fileName', 'photo.jpg'),
-                    "contentBase64": photo.get('base64Content', ''),
-                    "contentType": photo.get('contentType', 'image/jpeg'),
-                    "mediaType": MediaType.IMAGE.value,
-                    "caption": photo.get('caption', 'Address verification photo'),
-                    "takenAt": photo.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
-                    "latitude": photo.get('latitude', ''),
-                    "longitude": photo.get('longitude', '')
+                    "FileName": photo.get('fileName', 'photo.jpg'),
+                    "ContentBase64": photo.get('base64Content', ''),
+                    "ContentType": photo.get('contentType', 'image/jpeg'),
+                    "MediaType": MediaType.IMAGE.value,
+                    "Caption": photo.get('caption', 'Address verification photo'),
+                    "TakenAt": photo.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
+                    "Latitude": photo.get('latitude', ''),
+                    "Longitude": photo.get('longitude', '')
                 })
 
         # Parse customer name into first and last name
@@ -286,33 +287,33 @@ class AVSShipdayIntegration:
         address = verification_details.get('address', '')
         address_parts = self._parse_address(address)
 
-        # Build response object
+        # Build response object - using PascalCase for AVS API
         response = {
-            "activityId": activity_id,
-            "customerName": customer_name,
-            "customer_reference": activity_id,  # Required by AVS
-            "subject_first_name": first_name,  # Required by AVS
-            "subject_last_name": last_name,  # Required by AVS
-            "address": address,
-            "address_street": address_parts['street'],  # Required by AVS
-            "address_city": address_parts['city'],  # Required by AVS
-            "address_state": address_parts['state'],  # Required by AVS
-            "address_country": address_parts['country'],  # Required by AVS
-            "visitDate": verification_details.get('visitDate', datetime.utcnow().isoformat() + 'Z'),
-            "addressExists": verification_details.get('addressExists', True),
-            "isResidentialAddress": verification_details.get('isResidentialAddress', True),
-            "isCustomerResidence": verification_details.get('isCustomerResidence', True),
-            "isCustomerKnown": verification_details.get('isCustomerKnown', False),
-            "relationshipWithPersonMet": verification_details.get('relationshipWithPersonMet', 'Not specified'),
-            "nameOfPersonMet": verification_details.get('nameOfPersonMet', 'Name not given'),
-            "easeOfLocation": verification_details.get('easeOfLocation', 'Medium'),
-            "comments": verification_details.get('comments', ''),
-            "additionalComments": verification_details.get('additionalComments', ''),
-            "receivedDate": datetime.utcnow().isoformat() + 'Z',
-            "metOthers": verification_details.get('metOthers', False),
-            "verificationStatus": verification_details.get('verificationStatus', VerificationStatus.SUCCESS.value),
-            "addressMedia": address_media,
-            "reportUrl": verification_details.get('reportUrl', '')
+            "ActivityId": activity_id,
+            "CustomerName": customer_name,
+            "CustomerReference": activity_id,  # Required by AVS
+            "SubjectFirstName": first_name,  # Required by AVS
+            "SubjectLastName": last_name,  # Required by AVS
+            "Address": address,
+            "AddressStreet": address_parts['street'],  # Required by AVS
+            "AddressCity": address_parts['city'],  # Required by AVS
+            "AddressState": address_parts['state'],  # Required by AVS
+            "AddressCountry": address_parts['country'],  # Required by AVS
+            "VisitDate": verification_details.get('visitDate', datetime.utcnow().isoformat() + 'Z'),
+            "AddressExists": verification_details.get('addressExists', True),
+            "IsResidentialAddress": verification_details.get('isResidentialAddress', True),
+            "IsCustomerResidence": verification_details.get('isCustomerResidence', True),
+            "IsCustomerKnown": verification_details.get('isCustomerKnown', False),
+            "RelationshipWithPersonMet": verification_details.get('relationshipWithPersonMet', 'Not specified'),
+            "NameOfPersonMet": verification_details.get('nameOfPersonMet', 'Name not given'),
+            "EaseOfLocation": verification_details.get('easeOfLocation', 'Medium'),
+            "Comments": verification_details.get('comments', ''),
+            "AdditionalComments": verification_details.get('additionalComments', ''),
+            "ReceivedDate": datetime.utcnow().isoformat() + 'Z',
+            "MetOthers": verification_details.get('metOthers', False),
+            "VerificationStatus": verification_details.get('verificationStatus', VerificationStatus.SUCCESS.value),
+            "AddressMedia": address_media,
+            "ReportUrl": verification_details.get('reportUrl', '')
         }
 
         return response
