@@ -187,15 +187,12 @@ class AVSShipdayIntegration:
             Response from AVS API
         """
         try:
-            # Construct AVS response payload - wrapped in 'request' as required by AVS API
-            # Note: Field names are PascalCase as required by AVS
+            # Construct AVS response payload with PascalCase field names
             avs_payload = {
-                "request": {
-                    "VendorId": self.avs_vendor_id,
-                    "AddressVerificationResponses": [
-                        self._build_avs_response(activity_id, shipday_order_data, verification_details)
-                    ]
-                }
+                "VendorId": self.avs_vendor_id,
+                "AddressVerificationResponses": [
+                    self._build_avs_response(activity_id, shipday_order_data, verification_details)
+                ]
             }
 
             # Prepare headers
@@ -211,6 +208,7 @@ class AVSShipdayIntegration:
             print(f"[AVS] Submitting to: {full_url}")
             print(f"[AVS] Vendor ID: {self.avs_vendor_id}")
             print(f"[AVS] Subscription Key (first 8 chars): {self.avs_subscription_key[:8] if self.avs_subscription_key else 'NOT SET'}...")
+            print(f"[AVS] Payload: {json.dumps(avs_payload, indent=2)[:1000]}")
 
             # Submit to AVS
             response = requests.post(
