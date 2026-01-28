@@ -1,26 +1,25 @@
 """
 Enhanced Flask Service for AVS-Shipday Integration
-Provides REST API endpoints for address verification and delivery management.
+Provides REST API endpoints for bidirectional AVS and Shipday integration.
 """
 
 import os
-import re
 import json
 import logging
 import hmac
-import hashlib
 from functools import wraps
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
-from flasgger import Swagger, swag_from
+from flasgger import Swagger
 
 from avs_shipday_integration import (
-    AVSClient, ShipdayClient, AVSShipdayIntegration,
-    VerificationResult, Address
+    AVSShipdayIntegration,
+    VerificationStatus,
+    MediaType
 )
 
 # Configure logging
@@ -60,8 +59,8 @@ swagger_template = {
     "swagger": "2.0",
     "info": {
         "title": "AVS-Shipday Integration API",
-        "description": "REST API for address verification and delivery management with Shipday integration.",
-        "version": "1.0.0",
+        "description": "REST API for bidirectional AVS and Shipday integration. Handles address verification requests from AVS and submits verification results back.",
+        "version": "2.0.0",
         "contact": {
             "name": "API Support"
         }
@@ -82,17 +81,20 @@ swagger_template = {
     },
     "tags": [
         {"name": "Health", "description": "Health check endpoints"},
-        {"name": "Address Verification", "description": "Address verification endpoints"},
-        {"name": "Vendor", "description": "Vendor address verification endpoints"},
-        {"name": "Orders", "description": "Order management endpoints"},
+        {"name": "AVS Integration", "description": "AVS address verification endpoints"},
+        {"name": "Orders", "description": "Shipday order management endpoints"},
         {"name": "Webhooks", "description": "Webhook handlers"}
     ]
 }
 
 swagger = Swagger(app, config=swagger_config, template=swagger_template)
 
-# API key for authentication
+# Environment variables
 API_KEY = os.getenv("API_KEY")
+SHIPDAY_API_KEY = os.getenv("SHIPDAY_API_KEY")
+AVS_VENDOR_ID = os.getenv("AVS_VENDOR_ID")
+AVS_SUBSCRIPTION_KEY = os.getenv("AVS_SUBSCRIPTION_KEY")
+AVS_BASE_URL = os.getenv("AVS_BASE_URL", "https://alat-dev-apim.azure-api.net/customops")
 SHIPDAY_WEBHOOK_SECRET = os.getenv("SHIPDAY_WEBHOOK_SECRET")
 
 
@@ -168,30 +170,27 @@ def handle_exception(e):
     }), 500
 
 
-# Initialize clients lazily
-_avs_client: Optional[AVSClient] = None
-_shipday_client: Optional[ShipdayClient] = None
+# Initialize integration lazily
 _integration: Optional[AVSShipdayIntegration] = None
 
 
-def get_avs_client() -> AVSClient:
-    global _avs_client
-    if _avs_client is None:
-        _avs_client = AVSClient()
-    return _avs_client
-
-
-def get_shipday_client() -> ShipdayClient:
-    global _shipday_client
-    if _shipday_client is None:
-        _shipday_client = ShipdayClient()
-    return _shipday_client
-
-
 def get_integration() -> AVSShipdayIntegration:
+    """Get or create the AVS-Shipday integration instance."""
     global _integration
     if _integration is None:
-        _integration = AVSShipdayIntegration()
+        if not SHIPDAY_API_KEY:
+            raise ValueError("SHIPDAY_API_KEY environment variable is required")
+        if not AVS_VENDOR_ID:
+            raise ValueError("AVS_VENDOR_ID environment variable is required")
+        if not AVS_SUBSCRIPTION_KEY:
+            raise ValueError("AVS_SUBSCRIPTION_KEY environment variable is required")
+
+        _integration = AVSShipdayIntegration(
+            shipday_api_key=SHIPDAY_API_KEY,
+            avs_vendor_id=AVS_VENDOR_ID,
+            avs_subscription_key=AVS_SUBSCRIPTION_KEY,
+            avs_base_url=AVS_BASE_URL
+        )
     return _integration
 
 
@@ -217,11 +216,15 @@ def health_check():
             service:
               type: string
               example: avs-shipday-integration
+            version:
+              type: string
+              example: "2.0.0"
     """
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "service": "avs-shipday-integration"
+        "service": "avs-shipday-integration",
+        "version": "2.0.0"
     })
 
 
@@ -230,28 +233,29 @@ def root():
     """Root endpoint with API information."""
     return jsonify({
         "service": "AVS-Shipday Integration API",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "description": "Bidirectional integration between AVS and Shipday",
         "endpoints": {
             "health": "/health",
-            "verify_address": "/api/v1/verify-address",
-            "vendor_address_verification": "/vendor/address-verification/submit",
-            "create_order": "/api/v1/orders",
+            "docs": "/docs",
+            "avs_webhook": "/api/v1/avs/webhook",
+            "submit_verification": "/api/v1/avs/submit-verification",
             "get_order": "/api/v1/orders/<order_id>",
-            "complete_delivery": "/api/v1/orders/<order_id>/complete",
-            "upload_photo": "/api/v1/orders/<order_id>/photos",
-            "webhook": "/webhooks/shipday"
+            "list_orders": "/api/v1/orders",
+            "shipday_webhook": "/webhooks/shipday"
         }
     })
 
 
-# Address Verification Endpoints
-@app.route("/api/v1/verify-address", methods=["POST"])
+# ==================== AVS INTEGRATION ENDPOINTS ====================
+
+@app.route("/api/v1/avs/webhook", methods=["POST"])
 @require_api_key
-def verify_address():
-    """Verify and standardize a delivery address.
+def avs_webhook():
+    """Handle incoming address verification requests from AVS.
     ---
     tags:
-      - Address Verification
+      - AVS Integration
     security:
       - ApiKeyAuth: []
       - BearerAuth: []
@@ -262,385 +266,86 @@ def verify_address():
         schema:
           type: object
           required:
-            - address
+            - vendorId
+            - addressVerificationResponses
           properties:
-            address:
+            vendorId:
               type: string
-              example: "123 Main St, City, State 12345"
-    responses:
-      200:
-        description: Address verification result
-        schema:
-          type: object
-          properties:
-            success:
-              type: boolean
-            original_address:
-              type: string
-            confidence_score:
-              type: number
-            verified_address:
-              type: object
-              properties:
-                street:
-                  type: string
-                city:
-                  type: string
-                state:
-                  type: string
-                zip_code:
-                  type: string
-                country:
-                  type: string
-                latitude:
-                  type: number
-                longitude:
-                  type: number
-            formatted_address:
-              type: string
-      400:
-        description: Bad request - address is required
-      401:
-        description: Unauthorized - invalid or missing API key
-      500:
-        description: Configuration error
-    """
-    data = request.get_json()
-    if not data or "address" not in data:
-        return jsonify({"error": "Bad Request", "message": "Address is required"}), 400
-
-    address = data["address"].strip()
-    if not address:
-        return jsonify({"error": "Bad Request", "message": "Address cannot be empty"}), 400
-
-    try:
-        avs = get_avs_client()
-        result = avs.verify_address(address)
-
-        response = {
-            "success": result.is_valid,
-            "original_address": result.original_address,
-            "confidence_score": result.confidence_score
-        }
-
-        if result.is_valid and result.verified_address:
-            response["verified_address"] = result.verified_address.to_dict()
-            response["formatted_address"] = result.verified_address.format_full()
-        else:
-            response["error"] = result.error_message
-            if result.suggestions:
-                response["suggestions"] = result.suggestions
-
-        return jsonify(response)
-
-    except ValueError as e:
-        return jsonify({"error": "Configuration Error", "message": str(e)}), 500
-
-
-@app.route("/api/v1/verify-address/batch", methods=["POST"])
-@require_api_key
-def verify_addresses_batch():
-    """Verify multiple addresses in a single request.
-    ---
-    tags:
-      - Address Verification
-    security:
-      - ApiKeyAuth: []
-      - BearerAuth: []
-    parameters:
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - addresses
-          properties:
-            addresses:
-              type: array
-              items:
-                type: string
-              example: ["123 Main St, City, State 12345", "456 Oak Ave, Town, State 67890"]
-    responses:
-      200:
-        description: Batch verification results
-        schema:
-          type: object
-          properties:
-            success:
-              type: boolean
-            count:
-              type: integer
-            results:
+              description: Vendor ID (GUID)
+              example: "12345678-1234-1234-1234-123456789012"
+            addressVerificationResponses:
               type: array
               items:
                 type: object
                 properties:
-                  original:
+                  activityId:
                     type: string
-                  is_valid:
-                    type: boolean
-                  confidence_score:
-                    type: number
-                  verified_address:
-                    type: object
-                  error:
+                    example: "ACT-001"
+                  customerName:
                     type: string
-      400:
-        description: Bad request - addresses array is required
-      401:
-        description: Unauthorized - invalid or missing API key
-      500:
-        description: Configuration error
-    """
-    data = request.get_json()
-    if not data or "addresses" not in data:
-        return jsonify({"error": "Bad Request", "message": "Addresses array is required"}), 400
-
-    addresses = data["addresses"]
-    if not isinstance(addresses, list) or len(addresses) == 0:
-        return jsonify({"error": "Bad Request", "message": "Addresses must be a non-empty array"}), 400
-
-    if len(addresses) > 50:
-        return jsonify({"error": "Bad Request", "message": "Maximum 50 addresses per request"}), 400
-
-    try:
-        avs = get_avs_client()
-        results = []
-
-        for addr in addresses:
-            result = avs.verify_address(addr)
-            results.append({
-                "original": addr,
-                "is_valid": result.is_valid,
-                "confidence_score": result.confidence_score,
-                "verified_address": result.verified_address.to_dict() if result.verified_address else None,
-                "error": result.error_message
-            })
-
-        return jsonify({
-            "success": True,
-            "count": len(results),
-            "results": results
-        })
-
-    except ValueError as e:
-        return jsonify({"error": "Configuration Error", "message": str(e)}), 500
-
-
-@app.route("/vendor/address-verification/submit", methods=["POST"])
-@require_api_key
-def vendor_address_verification_submit():
-    """Submit an address verification request.
-    ---
-    tags:
-      - Vendor
-    security:
-      - ApiKeyAuth: []
-      - BearerAuth: []
-    parameters:
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - customer_reference
-            - subject_first_name
-            - subject_last_name
-            - address_street
-            - address_city
-            - address_state
-            - address_country
-          properties:
-            customer_reference:
-              type: string
-              description: Unique reference for the customer/request
-              example: "CUST-12345"
-            verification_type:
-              type: string
-              description: Type of verification
-              default: "physical_address"
-              example: "physical_address"
-            subject_first_name:
-              type: string
-              description: First name of the subject
-              example: "John"
-            subject_last_name:
-              type: string
-              description: Last name of the subject
-              example: "Doe"
-            subject_middle_name:
-              type: string
-              description: Middle name of the subject
-              example: "Michael"
-            subject_email:
-              type: string
-              format: email
-              description: Email address of the subject
-              example: "john.doe@example.com"
-            subject_phone:
-              type: string
-              description: Phone number of the subject
-              example: "+2348012345678"
-            subject_date_of_birth:
-              type: string
-              description: Date of birth of the subject
-              example: "1990-01-15"
-            address_street:
-              type: string
-              description: Street address
-              example: "123 Main Street"
-            address_city:
-              type: string
-              description: City
-              example: "Lagos"
-            address_state:
-              type: string
-              description: State
-              example: "Lagos"
-            address_lga:
-              type: string
-              description: Local Government Area
-              example: "Ikeja"
-            address_landmark:
-              type: string
-              description: Nearby landmark
-              example: "Near Central Mosque"
-            address_postal_code:
-              type: string
-              description: Postal code
-              example: "100001"
-            address_country:
-              type: string
-              description: Country
-              example: "Nigeria"
+                    example: "John Doe"
+                  address:
+                    type: string
+                    example: "123 Main Street, Lagos, Nigeria"
+                  visitDate:
+                    type: string
+                    example: "2025-01-28T10:00:00Z"
+                  additionalComments:
+                    type: string
     responses:
       200:
-        description: Address verification request submitted successfully
+        description: Request processed successfully
         schema:
           type: object
           properties:
             status:
               type: string
-              description: Status of the request
-              example: "pending"
+              example: success
             message:
               type: string
-              description: Response message
-              example: "Address verification request submitted successfully"
-            reference:
+            requestId:
               type: string
-              description: Reference ID for tracking the verification
-              example: "AVS-2025-0001"
+            createdTasks:
+              type: array
+              items:
+                type: object
       400:
-        description: Bad request - missing required fields
+        description: Bad request - invalid payload
       401:
         description: Unauthorized - invalid or missing API key
       500:
-        description: Configuration error
+        description: Server error
     """
-    import uuid
-
     data = request.get_json()
     if not data:
         return jsonify({
             "status": "error",
             "message": "Request body is required",
-            "reference": ""
+            "requestId": None
         }), 400
-
-    # Validate required fields
-    required_fields = [
-        "customer_reference",
-        "subject_first_name",
-        "subject_last_name",
-        "address_street",
-        "address_city",
-        "address_state",
-        "address_country"
-    ]
-
-    missing_fields = [field for field in required_fields if not data.get(field)]
-    if missing_fields:
-        return jsonify({
-            "status": "error",
-            "message": f"Missing required fields: {', '.join(missing_fields)}",
-            "reference": ""
-        }), 400
-
-    # Extract address fields
-    customer_reference = data.get("customer_reference", "")
-    verification_type = data.get("verification_type", "physical_address")
-
-    # Subject information
-    subject_info = {
-        "first_name": data.get("subject_first_name", ""),
-        "last_name": data.get("subject_last_name", ""),
-        "middle_name": data.get("subject_middle_name", ""),
-        "email": data.get("subject_email", ""),
-        "phone": data.get("subject_phone", ""),
-        "date_of_birth": data.get("subject_date_of_birth", "")
-    }
-
-    # Address information
-    address_info = {
-        "street": data.get("address_street", ""),
-        "city": data.get("address_city", ""),
-        "state": data.get("address_state", ""),
-        "lga": data.get("address_lga", ""),
-        "landmark": data.get("address_landmark", ""),
-        "postal_code": data.get("address_postal_code", ""),
-        "country": data.get("address_country", "")
-    }
-
-    # Build full address string for verification
-    address_parts = [
-        address_info["street"],
-        address_info["lga"],
-        address_info["city"],
-        address_info["state"],
-        address_info["postal_code"],
-        address_info["country"]
-    ]
-    full_address = ", ".join(part for part in address_parts if part)
-
-    # Generate a unique reference for this verification request
-    verification_reference = f"AVS-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:8].upper()}"
 
     try:
-        # Log the verification request
-        logger.info(f"Address verification request received: {verification_reference}")
-        logger.info(f"Customer reference: {customer_reference}")
-        logger.info(f"Subject: {subject_info['first_name']} {subject_info['last_name']}")
-        logger.info(f"Address: {full_address}")
+        integration = get_integration()
+        result = integration.handle_avs_request(data)
 
-        # TODO: Integrate with actual address verification service
-        # For now, we acknowledge receipt and return pending status
+        status_code = 200 if result.get("status") == "success" else 400
+        return jsonify(result), status_code
 
-        return jsonify({
-            "status": "pending",
-            "message": "Address verification request submitted successfully",
-            "reference": customer_reference
-        }), 200
-
-    except Exception as e:
-        logger.exception(f"Error processing address verification request: {str(e)}")
+    except ValueError as e:
         return jsonify({
             "status": "error",
-            "message": "An error occurred while processing the request",
-            "reference": ""
+            "message": str(e),
+            "requestId": None
         }), 500
 
 
-# Order Management Endpoints
-@app.route("/api/v1/orders", methods=["POST"])
+@app.route("/api/v1/avs/submit-verification", methods=["POST"])
 @require_api_key
-def create_order():
-    """Create a new delivery order with address verification.
+def submit_verification():
+    """Submit completed verification result back to AVS.
     ---
     tags:
-      - Orders
+      - AVS Integration
     security:
       - ApiKeyAuth: []
       - BearerAuth: []
@@ -651,101 +356,211 @@ def create_order():
         schema:
           type: object
           required:
-            - order_number
-            - customer
-            - delivery_address
-            - items
+            - activityId
+            - verificationDetails
           properties:
-            order_number:
+            activityId:
               type: string
-              example: "ORD-12345"
-            customer:
+              description: Original activity ID from AVS
+              example: "ACT-001"
+            shipdayOrderId:
+              type: string
+              description: Shipday order ID (optional, will fetch order data)
+              example: "12345"
+            verificationDetails:
               type: object
               required:
-                - name
-                - phone
-                - email
+                - customerName
+                - address
+                - addressExists
               properties:
-                name:
+                customerName:
                   type: string
                   example: "John Doe"
-                phone:
+                address:
                   type: string
-                  example: "+1234567890"
-                email:
+                  example: "123 Main Street, Lagos, Nigeria"
+                visitDate:
                   type: string
-                  example: "john@example.com"
-            delivery_address:
-              type: string
-              example: "123 Main St, City, State 12345"
-            items:
-              type: array
-              items:
-                type: object
-                properties:
-                  name:
-                    type: string
-                  quantity:
-                    type: integer
-                  price:
-                    type: number
-              example: [{"name": "Item 1", "quantity": 1, "price": 10.00}]
-            special_instructions:
-              type: string
-              example: "Leave at door"
+                  example: "2025-01-28T10:00:00Z"
+                addressExists:
+                  type: boolean
+                  example: true
+                isResidentialAddress:
+                  type: boolean
+                  example: true
+                isCustomerResidence:
+                  type: boolean
+                  example: true
+                isCustomerKnown:
+                  type: boolean
+                  example: false
+                relationshipWithPersonMet:
+                  type: string
+                  example: "Self"
+                nameOfPersonMet:
+                  type: string
+                  example: "John Doe"
+                easeOfLocation:
+                  type: string
+                  enum: [Easy, Medium, Hard]
+                  example: "Easy"
+                comments:
+                  type: string
+                additionalComments:
+                  type: string
+                metOthers:
+                  type: boolean
+                  example: false
+                verificationStatus:
+                  type: integer
+                  description: "1=PENDING, 2=SUCCESS, 3=FAILED, 4=RETURNED"
+                  example: 2
+                reportUrl:
+                  type: string
+                  example: "https://example.com/report/123"
+                photos:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      fileName:
+                        type: string
+                      base64Content:
+                        type: string
+                      contentType:
+                        type: string
+                      caption:
+                        type: string
+                      timestamp:
+                        type: string
+                      latitude:
+                        type: string
+                      longitude:
+                        type: string
     responses:
-      201:
-        description: Order created successfully
+      200:
+        description: Verification submitted successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            status_code:
+              type: integer
+            message:
+              type: string
       400:
-        description: Bad request or address verification failed
+        description: Bad request - missing required fields
       401:
-        description: Unauthorized - invalid or missing API key
+        description: Unauthorized
       500:
-        description: Configuration error
+        description: Server error
     """
     data = request.get_json()
     if not data:
-        return jsonify({"error": "Bad Request", "message": "Request body is required"}), 400
-
-    # Validate required fields
-    required = ["order_number", "customer", "delivery_address", "items"]
-    missing = [f for f in required if f not in data]
-    if missing:
         return jsonify({
-            "error": "Bad Request",
-            "message": f"Missing required fields: {', '.join(missing)}"
+            "success": False,
+            "message": "Request body is required"
         }), 400
 
-    customer = data["customer"]
-    if not all(k in customer for k in ["name", "phone", "email"]):
+    activity_id = data.get("activityId")
+    verification_details = data.get("verificationDetails", {})
+
+    if not activity_id:
         return jsonify({
-            "error": "Bad Request",
-            "message": "Customer must include name, phone, and email"
+            "success": False,
+            "message": "activityId is required"
+        }), 400
+
+    if not verification_details:
+        return jsonify({
+            "success": False,
+            "message": "verificationDetails is required"
         }), 400
 
     try:
         integration = get_integration()
-        result = integration.create_verified_delivery(
-            customer_name=customer["name"],
-            phone=customer["phone"],
-            email=customer["email"],
-            address=data["delivery_address"],
-            items=data["items"],
-            order_number=data["order_number"],
-            special_instructions=data.get("special_instructions")
+
+        # Get Shipday order data if order ID provided
+        shipday_order_data = {}
+        shipday_order_id = data.get("shipdayOrderId")
+        if shipday_order_id:
+            order_data = integration.get_shipday_order(shipday_order_id)
+            if order_data:
+                shipday_order_data = order_data
+
+        # Submit to AVS
+        result = integration.submit_verification_result(
+            activity_id=activity_id,
+            shipday_order_data=shipday_order_data,
+            verification_details=verification_details
         )
 
-        status_code = 201 if result["success"] else 400
+        status_code = 200 if result.get("success") else 400
         return jsonify(result), status_code
 
     except ValueError as e:
-        return jsonify({"error": "Configuration Error", "message": str(e)}), 500
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
 
+
+@app.route("/api/v1/avs/validate-payload", methods=["POST"])
+@require_api_key
+def validate_avs_payload():
+    """Validate an AVS payload before submission.
+    ---
+    tags:
+      - AVS Integration
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+    responses:
+      200:
+        description: Validation result
+        schema:
+          type: object
+          properties:
+            valid:
+              type: boolean
+            errors:
+              type: array
+              items:
+                type: string
+      400:
+        description: Bad request
+      401:
+        description: Unauthorized
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({
+            "valid": False,
+            "errors": ["Request body is required"]
+        }), 400
+
+    is_valid, errors = AVSShipdayIntegration.validate_avs_payload(data)
+
+    return jsonify({
+        "valid": is_valid,
+        "errors": errors
+    })
+
+
+# ==================== ORDER MANAGEMENT ENDPOINTS ====================
 
 @app.route("/api/v1/orders/<order_id>", methods=["GET"])
 @require_api_key
 def get_order(order_id: str):
-    """Get order details and status.
+    """Get order details from Shipday.
     ---
     tags:
       - Orders
@@ -757,34 +572,34 @@ def get_order(order_id: str):
         name: order_id
         type: string
         required: true
-        description: The order ID
+        description: The Shipday order ID
     responses:
       200:
         description: Order details
       401:
-        description: Unauthorized - invalid or missing API key
+        description: Unauthorized
       404:
         description: Order not found
       500:
         description: Configuration error
     """
     try:
-        shipday = get_shipday_client()
-        result = shipday.get_order_status(order_id)
+        integration = get_integration()
+        order_data = integration.get_shipday_order(order_id)
 
-        if result["success"]:
-            return jsonify(result["data"])
+        if order_data:
+            return jsonify(order_data)
         else:
-            return jsonify({"error": "Not Found", "message": result["error"]}), 404
+            return jsonify({"error": "Not Found", "message": "Order not found"}), 404
 
     except ValueError as e:
         return jsonify({"error": "Configuration Error", "message": str(e)}), 500
 
 
-@app.route("/api/v1/orders/<order_id>/status", methods=["PUT"])
+@app.route("/api/v1/orders", methods=["GET"])
 @require_api_key
-def update_order_status(order_id: str):
-    """Update order status.
+def list_orders():
+    """List completed orders from Shipday.
     ---
     tags:
       - Orders
@@ -792,208 +607,41 @@ def update_order_status(order_id: str):
       - ApiKeyAuth: []
       - BearerAuth: []
     parameters:
-      - in: path
-        name: order_id
+      - in: query
+        name: start_date
         type: string
-        required: true
-        description: The order ID
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - status
-          properties:
-            status:
-              type: string
-              enum: [PENDING, ASSIGNED, PICKED_UP, EN_ROUTE, DELIVERED, CANCELLED]
-              example: "DELIVERED"
-            notes:
-              type: string
-              example: "Left at front door"
+        description: Start date in ISO format
+      - in: query
+        name: end_date
+        type: string
+        description: End date in ISO format
     responses:
       200:
-        description: Order status updated
-      400:
-        description: Bad request - invalid status
+        description: List of completed orders
       401:
-        description: Unauthorized - invalid or missing API key
+        description: Unauthorized
       500:
         description: Configuration error
     """
-    data = request.get_json()
-    if not data or "status" not in data:
-        return jsonify({"error": "Bad Request", "message": "Status is required"}), 400
-
-    valid_statuses = ["PENDING", "ASSIGNED", "PICKED_UP", "EN_ROUTE", "DELIVERED", "CANCELLED"]
-    if data["status"] not in valid_statuses:
-        return jsonify({
-            "error": "Bad Request",
-            "message": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
-        }), 400
-
-    try:
-        shipday = get_shipday_client()
-        result = shipday.update_order_status(
-            order_id,
-            data["status"],
-            data.get("notes")
-        )
-
-        if result["success"]:
-            return jsonify(result["data"])
-        else:
-            return jsonify({"error": "Update Failed", "message": result["error"]}), 400
-
-    except ValueError as e:
-        return jsonify({"error": "Configuration Error", "message": str(e)}), 500
-
-
-# Photo Upload and Delivery Completion
-@app.route("/api/v1/orders/<order_id>/photos", methods=["POST"])
-@require_api_key
-def upload_photo(order_id: str):
-    """Upload a delivery photo.
-    ---
-    tags:
-      - Orders
-    security:
-      - ApiKeyAuth: []
-      - BearerAuth: []
-    parameters:
-      - in: path
-        name: order_id
-        type: string
-        required: true
-        description: The order ID
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - photo_url
-          properties:
-            photo_url:
-              type: string
-              format: uri
-              example: "https://storage.example.com/photo.jpg"
-            photo_type:
-              type: string
-              enum: [proof_of_delivery, signature, package, location]
-              default: proof_of_delivery
-              example: "proof_of_delivery"
-    responses:
-      200:
-        description: Photo uploaded successfully
-      400:
-        description: Bad request - invalid photo type or missing URL
-      401:
-        description: Unauthorized - invalid or missing API key
-      500:
-        description: Configuration error
-    """
-    data = request.get_json()
-    if not data or "photo_url" not in data:
-        return jsonify({"error": "Bad Request", "message": "Photo URL is required"}), 400
-
-    photo_type = data.get("photo_type", "proof_of_delivery")
-    valid_types = ["proof_of_delivery", "signature", "package", "location"]
-    if photo_type not in valid_types:
-        return jsonify({
-            "error": "Bad Request",
-            "message": f"Invalid photo type. Must be one of: {', '.join(valid_types)}"
-        }), 400
-
-    try:
-        shipday = get_shipday_client()
-        result = shipday.upload_delivery_photo(
-            order_id,
-            data["photo_url"],
-            photo_type
-        )
-
-        if result["success"]:
-            return jsonify({
-                "success": True,
-                "order_id": order_id,
-                "photo_type": photo_type,
-                "data": result["data"]
-            })
-        else:
-            return jsonify({"error": "Upload Failed", "message": result["error"]}), 400
-
-    except ValueError as e:
-        return jsonify({"error": "Configuration Error", "message": str(e)}), 500
-
-
-@app.route("/api/v1/orders/<order_id>/complete", methods=["POST"])
-@require_api_key
-def complete_delivery(order_id: str):
-    """Mark delivery as complete with proof photos.
-    ---
-    tags:
-      - Orders
-    security:
-      - ApiKeyAuth: []
-      - BearerAuth: []
-    parameters:
-      - in: path
-        name: order_id
-        type: string
-        required: true
-        description: The order ID
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - photo_url
-          properties:
-            photo_url:
-              type: string
-              format: uri
-              example: "https://storage.example.com/delivery-proof.jpg"
-            signature_url:
-              type: string
-              format: uri
-              example: "https://storage.example.com/signature.jpg"
-            notes:
-              type: string
-              example: "Delivered to customer"
-    responses:
-      200:
-        description: Delivery completed successfully
-      400:
-        description: Bad request or completion failed
-      401:
-        description: Unauthorized - invalid or missing API key
-      500:
-        description: Configuration error
-    """
-    data = request.get_json()
-    if not data or "photo_url" not in data:
-        return jsonify({"error": "Bad Request", "message": "Photo URL is required"}), 400
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
 
     try:
         integration = get_integration()
-        result = integration.process_delivery_completion(
-            order_id=order_id,
-            photo_url=data["photo_url"],
-            signature_url=data.get("signature_url"),
-            notes=data.get("notes")
-        )
+        orders = integration.list_completed_orders(start_date, end_date)
 
-        status_code = 200 if result["success"] else 400
-        return jsonify(result), status_code
+        return jsonify({
+            "success": True,
+            "count": len(orders),
+            "orders": orders
+        })
 
     except ValueError as e:
         return jsonify({"error": "Configuration Error", "message": str(e)}), 500
 
 
-# Shipday Webhook Handler
+# ==================== SHIPDAY WEBHOOK HANDLER ====================
+
 @app.route("/webhooks/shipday", methods=["POST"])
 @verify_shipday_webhook
 def shipday_webhook():
@@ -1078,7 +726,9 @@ def handle_status_change(data: Dict) -> Dict:
 
     logger.info(f"Order {order_id} status changed: {old_status} -> {new_status}")
 
-    # Add custom logic here (notifications, database updates, etc.)
+    # If order is delivered, we might want to auto-submit verification to AVS
+    if new_status == "DELIVERED":
+        logger.info(f"Order {order_id} delivered - verification can be submitted to AVS")
 
     return {"order_id": order_id, "new_status": new_status}
 
@@ -1128,9 +778,47 @@ def handle_carrier_location(data: Dict) -> Dict:
     return {"carrier_id": carrier_id, "location": location}
 
 
+# ==================== UTILITY ENDPOINTS ====================
+
+@app.route("/api/v1/verification-statuses", methods=["GET"])
+def get_verification_statuses():
+    """Get list of valid verification statuses.
+    ---
+    tags:
+      - AVS Integration
+    responses:
+      200:
+        description: List of verification statuses
+    """
+    return jsonify({
+        "statuses": [
+            {"value": status.value, "name": status.name}
+            for status in VerificationStatus
+        ]
+    })
+
+
+@app.route("/api/v1/media-types", methods=["GET"])
+def get_media_types():
+    """Get list of valid media types.
+    ---
+    tags:
+      - AVS Integration
+    responses:
+      200:
+        description: List of media types
+    """
+    return jsonify({
+        "mediaTypes": [
+            {"value": media_type.value, "name": media_type.name}
+            for media_type in MediaType
+        ]
+    })
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
 
-    logger.info(f"Starting AVS-Shipday Integration Service on port {port}")
+    logger.info(f"Starting AVS-Shipday Integration Service v2.0.0 on port {port}")
     app.run(host="0.0.0.0", port=port, debug=debug)

@@ -1,450 +1,557 @@
 """
 AVS-Shipday Integration Module
-Handles address verification and Shipday delivery management integration.
+Handles bidirectional integration between Address Verification Service and Shipday API
 """
 
-import os
-import re
-import logging
 import requests
-from typing import Optional, Dict, Any, Tuple
-from dataclasses import dataclass
+import json
+import base64
 from datetime import datetime
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from typing import Dict, List, Optional
+from enum import Enum
 
 
-@dataclass
-class Address:
-    """Represents a parsed and validated address."""
-    street: str
-    city: str
-    state: str
-    zip_code: str
-    country: str = "US"
-    apartment: Optional[str] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "street": self.street,
-            "city": self.city,
-            "state": self.state,
-            "zip_code": self.zip_code,
-            "country": self.country,
-            "apartment": self.apartment,
-            "latitude": self.latitude,
-            "longitude": self.longitude
-        }
-
-    def format_full(self) -> str:
-        """Return full formatted address string."""
-        parts = [self.street]
-        if self.apartment:
-            parts.append(f"Apt {self.apartment}")
-        parts.append(f"{self.city}, {self.state} {self.zip_code}")
-        return ", ".join(parts)
+class VerificationStatus(Enum):
+    """AVS Verification Status Enum"""
+    PENDING = 1
+    SUCCESS = 2
+    FAILED = 3
+    RETURNED = 4
 
 
-@dataclass
-class VerificationResult:
-    """Result of address verification."""
-    is_valid: bool
-    original_address: str
-    verified_address: Optional[Address] = None
-    confidence_score: float = 0.0
-    error_message: Optional[str] = None
-    suggestions: Optional[list] = None
-
-
-class AVSClient:
-    """Address Verification System client using Google Maps Geocoding API."""
-
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("GOOGLE_MAPS_API_KEY")
-        if not self.api_key:
-            raise ValueError("Google Maps API key is required")
-        self.base_url = "https://maps.googleapis.com/maps/api/geocode/json"
-
-    def verify_address(self, address: str) -> VerificationResult:
-        """
-        Verify and standardize an address using Google Maps Geocoding API.
-
-        Args:
-            address: Raw address string to verify
-
-        Returns:
-            VerificationResult with verification status and standardized address
-        """
-        try:
-            params = {
-                "address": address,
-                "key": self.api_key,
-                "components": "country:US"
-            }
-
-            response = requests.get(self.base_url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            if data["status"] == "OK" and data["results"]:
-                result = data["results"][0]
-                parsed = self._parse_geocode_result(result)
-
-                if parsed:
-                    return VerificationResult(
-                        is_valid=True,
-                        original_address=address,
-                        verified_address=parsed,
-                        confidence_score=self._calculate_confidence(result),
-                        suggestions=None
-                    )
-
-            # Handle partial matches or no results
-            suggestions = self._get_suggestions(data) if data.get("results") else None
-            return VerificationResult(
-                is_valid=False,
-                original_address=address,
-                error_message=f"Address verification failed: {data.get('status', 'UNKNOWN')}",
-                suggestions=suggestions
-            )
-
-        except requests.RequestException as e:
-            logger.error(f"API request failed: {e}")
-            return VerificationResult(
-                is_valid=False,
-                original_address=address,
-                error_message=f"API request failed: {str(e)}"
-            )
-
-    def _parse_geocode_result(self, result: Dict) -> Optional[Address]:
-        """Parse Google Geocoding API result into Address object."""
-        components = {comp["types"][0]: comp for comp in result.get("address_components", [])}
-
-        street_number = components.get("street_number", {}).get("long_name", "")
-        route = components.get("route", {}).get("long_name", "")
-        city = (components.get("locality") or components.get("sublocality") or
-                components.get("administrative_area_level_2", {})).get("long_name", "")
-        state = components.get("administrative_area_level_1", {}).get("short_name", "")
-        zip_code = components.get("postal_code", {}).get("long_name", "")
-
-        if not all([route, city, state, zip_code]):
-            return None
-
-        location = result.get("geometry", {}).get("location", {})
-
-        return Address(
-            street=f"{street_number} {route}".strip(),
-            city=city,
-            state=state,
-            zip_code=zip_code,
-            latitude=location.get("lat"),
-            longitude=location.get("lng")
-        )
-
-    def _calculate_confidence(self, result: Dict) -> float:
-        """Calculate confidence score based on geocoding result quality."""
-        location_type = result.get("geometry", {}).get("location_type", "")
-
-        confidence_map = {
-            "ROOFTOP": 1.0,
-            "RANGE_INTERPOLATED": 0.8,
-            "GEOMETRIC_CENTER": 0.6,
-            "APPROXIMATE": 0.4
-        }
-
-        base_score = confidence_map.get(location_type, 0.3)
-
-        # Adjust for partial match
-        if result.get("partial_match"):
-            base_score *= 0.7
-
-        return round(base_score, 2)
-
-    def _get_suggestions(self, data: Dict) -> Optional[list]:
-        """Extract address suggestions from partial matches."""
-        if not data.get("results"):
-            return None
-        return [r.get("formatted_address") for r in data["results"][:3]]
-
-
-class ShipdayClient:
-    """Shipday API client for delivery management."""
-
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("SHIPDAY_API_KEY")
-        if not self.api_key:
-            raise ValueError("Shipday API key is required")
-        self.base_url = "https://api.shipday.com"
-        self.headers = {
-            "Authorization": f"Basic {self.api_key}",
-            "Content-Type": "application/json"
-        }
-
-    def create_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Create a new delivery order in Shipday.
-
-        Args:
-            order_data: Order details including customer info, items, and delivery address
-
-        Returns:
-            API response with order confirmation
-        """
-        url = f"{self.base_url}/orders"
-
-        try:
-            response = requests.post(url, json=order_data, headers=self.headers, timeout=30)
-            response.raise_for_status()
-            return {"success": True, "data": response.json()}
-        except requests.RequestException as e:
-            logger.error(f"Failed to create Shipday order: {e}")
-            return {"success": False, "error": str(e)}
-
-    def get_order_status(self, order_id: str) -> Dict[str, Any]:
-        """Get the current status of an order."""
-        url = f"{self.base_url}/orders/{order_id}"
-
-        try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            return {"success": True, "data": response.json()}
-        except requests.RequestException as e:
-            logger.error(f"Failed to get order status: {e}")
-            return {"success": False, "error": str(e)}
-
-    def upload_delivery_photo(self, order_id: str, photo_url: str,
-                              photo_type: str = "proof_of_delivery") -> Dict[str, Any]:
-        """
-        Upload a delivery photo for proof of delivery.
-
-        Args:
-            order_id: The Shipday order ID
-            photo_url: URL of the photo to attach
-            photo_type: Type of photo (proof_of_delivery, signature, etc.)
-
-        Returns:
-            API response confirming photo upload
-        """
-        url = f"{self.base_url}/orders/{order_id}/photos"
-        payload = {
-            "photoUrl": photo_url,
-            "photoType": photo_type,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        try:
-            response = requests.post(url, json=payload, headers=self.headers, timeout=30)
-            response.raise_for_status()
-            return {"success": True, "data": response.json()}
-        except requests.RequestException as e:
-            logger.error(f"Failed to upload delivery photo: {e}")
-            return {"success": False, "error": str(e)}
-
-    def update_order_status(self, order_id: str, status: str,
-                            notes: Optional[str] = None) -> Dict[str, Any]:
-        """Update the status of an existing order."""
-        url = f"{self.base_url}/orders/{order_id}/status"
-        payload = {"status": status}
-        if notes:
-            payload["notes"] = notes
-
-        try:
-            response = requests.put(url, json=payload, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            return {"success": True, "data": response.json()}
-        except requests.RequestException as e:
-            logger.error(f"Failed to update order status: {e}")
-            return {"success": False, "error": str(e)}
-
-    def get_carrier_location(self, carrier_id: str) -> Dict[str, Any]:
-        """Get current location of a delivery carrier."""
-        url = f"{self.base_url}/carriers/{carrier_id}/location"
-
-        try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            return {"success": True, "data": response.json()}
-        except requests.RequestException as e:
-            logger.error(f"Failed to get carrier location: {e}")
-            return {"success": False, "error": str(e)}
+class MediaType(Enum):
+    """AVS Media Type Enum"""
+    IMAGE = 1
+    VIDEO = 2
 
 
 class AVSShipdayIntegration:
-    """
-    Main integration class combining AVS verification with Shipday delivery management.
-    """
+    """Main integration class for AVS and Shipday"""
 
-    def __init__(self, google_api_key: Optional[str] = None,
-                 shipday_api_key: Optional[str] = None):
-        self.avs = AVSClient(google_api_key)
-        self.shipday = ShipdayClient(shipday_api_key)
-
-    def create_verified_delivery(self, customer_name: str, phone: str,
-                                  email: str, address: str,
-                                  items: list, order_number: str,
-                                  special_instructions: Optional[str] = None) -> Dict[str, Any]:
+    def __init__(self,
+                 shipday_api_key: str,
+                 avs_vendor_id: str,
+                 avs_subscription_key: str,
+                 avs_base_url: str = "https://alat-dev-apim.azure-api.net/customops"):
         """
-        Create a delivery order with verified address.
+        Initialize the integration
 
         Args:
-            customer_name: Customer's full name
-            phone: Customer's phone number
-            email: Customer's email address
-            address: Delivery address to verify
-            items: List of order items
-            order_number: Unique order identifier
-            special_instructions: Optional delivery instructions
+            shipday_api_key: Your Shipday API key
+            avs_vendor_id: Your vendor ID provided by AVS (GUID)
+            avs_subscription_key: Subscription key for AVS API
+            avs_base_url: AVS API base URL (default is development)
+        """
+        self.shipday_api_key = shipday_api_key
+        self.avs_vendor_id = avs_vendor_id
+        self.avs_subscription_key = avs_subscription_key
+        self.avs_base_url = avs_base_url
+
+        self.shipday_base_url = "https://api.shipday.com"
+
+    # ==================== PHASE 1: RECEIVE FROM AVS ====================
+
+    def handle_avs_request(self, request_data: Dict) -> Dict:
+        """
+        Handle incoming address verification request from AVS
+        Creates corresponding tasks in Shipday
+
+        Args:
+            request_data: The JSON payload from AVS
 
         Returns:
-            Result containing verification status and order details
+            Response dictionary with status and request ID
         """
-        # Step 1: Verify the address
-        verification = self.avs.verify_address(address)
+        try:
+            vendor_id = request_data.get('vendorId')
+            verification_requests = request_data.get('addressVerificationResponses', [])
 
-        if not verification.is_valid:
+            if not vendor_id or not verification_requests:
+                return {
+                    "status": "error",
+                    "message": "Invalid request: missing vendorId or verification requests",
+                    "requestId": None
+                }
+
+            # Process each verification request
+            created_tasks = []
+            for request in verification_requests:
+                activity_id = request.get('activityId')
+
+                # Create Shipday delivery task
+                shipday_order = self._create_shipday_order(request)
+
+                if shipday_order:
+                    created_tasks.append({
+                        'activityId': activity_id,
+                        'shipdayOrderId': shipday_order.get('orderId')
+                    })
+
+            # Return success response
+            if created_tasks:
+                return {
+                    "status": "success",
+                    "message": "AVR request has been submitted successfully. Please track status using the request ID provided.",
+                    "requestId": verification_requests[0].get('activityId'),
+                    "createdTasks": created_tasks
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": "Failed to create Shipday orders",
+                    "requestId": None
+                }
+
+        except Exception as e:
             return {
-                "success": False,
-                "stage": "address_verification",
-                "error": verification.error_message,
-                "suggestions": verification.suggestions
+                "status": "error",
+                "message": f"Error processing request: {str(e)}",
+                "requestId": None
             }
 
-        verified = verification.verified_address
+    def _create_shipday_order(self, verification_request: Dict) -> Optional[Dict]:
+        """
+        Create a delivery order in Shipday based on AVS verification request
 
-        # Step 2: Build Shipday order payload
-        order_payload = {
-            "orderNumber": order_number,
+        Args:
+            verification_request: Single verification request from AVS
+
+        Returns:
+            Shipday order response or None if failed
+        """
+        try:
+            # Extract address information
+            customer_name = verification_request.get('customerName', '')
+            address = verification_request.get('address', '')
+            activity_id = verification_request.get('activityId', '')
+
+            # Prepare Shipday order payload
+            shipday_payload = {
+                "orderNumber": activity_id,  # Use activityId as order number
+                "customerName": customer_name,
+                "customerAddress": address,
+                "customerPhoneNumber": "",  # Add if available in your system
+                "customerEmail": "",  # Add if available
+                "orderItem": f"Address Verification for {customer_name}",
+                "orderNote": f"Verify address and collect proof. ActivityId: {activity_id}",
+                "orderSource": "AVS Integration",
+                "expectedDeliveryDate": verification_request.get('visitDate', ''),
+                "orderExternalId": activity_id,
+                "orderType": "address_verification",
+                "orderValue": 0,
+                # Add custom fields for verification details
+                "orderDetails": json.dumps({
+                    "activityId": activity_id,
+                    "verificationDate": verification_request.get('visitDate'),
+                    "additionalInfo": verification_request.get('additionalComments', '')
+                })
+            }
+
+            # Make API call to Shipday
+            headers = {
+                "Authorization": f"Basic {self.shipday_api_key}",
+                "Content-Type": "application/json"
+            }
+
+            response = requests.post(
+                f"{self.shipday_base_url}/orders",
+                headers=headers,
+                json=shipday_payload
+            )
+
+            if response.status_code in [200, 201]:
+                return response.json()
+            else:
+                print(f"Error creating Shipday order: {response.status_code} - {response.text}")
+                return None
+
+        except Exception as e:
+            print(f"Exception creating Shipday order: {str(e)}")
+            return None
+
+    # ==================== PHASE 2: SEND TO AVS ====================
+
+    def submit_verification_result(self,
+                                   activity_id: str,
+                                   shipday_order_data: Dict,
+                                   verification_details: Dict) -> Dict:
+        """
+        Submit completed verification result back to AVS
+
+        Args:
+            activity_id: The original activityId from AVS
+            shipday_order_data: Completed order data from Shipday
+            verification_details: Additional verification details collected
+
+        Returns:
+            Response from AVS API
+        """
+        try:
+            # Construct AVS response payload
+            avs_payload = {
+                "vendorId": self.avs_vendor_id,
+                "addressVerificationResponses": [
+                    self._build_avs_response(activity_id, shipday_order_data, verification_details)
+                ]
+            }
+
+            # Prepare headers
+            headers = {
+                "Content-Type": "application/json",
+                "x-vendor-id": self.avs_vendor_id,
+                "Ocp-Apim-Subscription-Key": self.avs_subscription_key
+            }
+
+            # Submit to AVS
+            response = requests.post(
+                f"{self.avs_base_url}/api/AddressVendor/receive-verification-response",
+                headers=headers,
+                json=avs_payload
+            )
+
+            if response.status_code == 200:
+                return {
+                    "success": True,
+                    "status_code": 200,
+                    "message": "Verification result submitted successfully",
+                    "response": response.json()
+                }
+            else:
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "message": "Failed to submit verification result",
+                    "error": response.text
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "status_code": 500,
+                "message": f"Exception submitting result: {str(e)}"
+            }
+
+    def _build_avs_response(self,
+                           activity_id: str,
+                           shipday_data: Dict,
+                           verification_details: Dict) -> Dict:
+        """
+        Build AVS response object from Shipday data and verification details
+
+        Args:
+            activity_id: Original activity ID
+            shipday_data: Data from Shipday
+            verification_details: Verification details collected by field agent
+
+        Returns:
+            Formatted AVS response object
+        """
+        # Extract media from verification details
+        address_media = []
+        if 'photos' in verification_details:
+            for photo in verification_details['photos']:
+                address_media.append({
+                    "fileName": photo.get('fileName', 'photo.jpg'),
+                    "contentBase64": photo.get('base64Content', ''),
+                    "contentType": photo.get('contentType', 'image/jpeg'),
+                    "mediaType": MediaType.IMAGE.value,
+                    "caption": photo.get('caption', 'Address verification photo'),
+                    "takenAt": photo.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
+                    "latitude": photo.get('latitude', ''),
+                    "longitude": photo.get('longitude', '')
+                })
+
+        # Parse customer name into first and last name
+        customer_name = verification_details.get('customerName', '')
+        first_name, last_name = self._parse_name(customer_name)
+
+        # Parse address into components
+        address = verification_details.get('address', '')
+        address_parts = self._parse_address(address)
+
+        # Build response object
+        response = {
+            "activityId": activity_id,
             "customerName": customer_name,
-            "customerPhone": self._format_phone(phone),
-            "customerEmail": email,
-            "deliveryAddress": {
-                "street": verified.street,
-                "city": verified.city,
-                "state": verified.state,
-                "zipCode": verified.zip_code,
-                "country": verified.country,
-                "unit": verified.apartment
-            },
-            "deliveryLatitude": verified.latitude,
-            "deliveryLongitude": verified.longitude,
-            "orderItems": items,
-            "deliveryInstruction": special_instructions or "",
-            "tips": 0,
-            "tax": 0,
-            "discounts": 0,
-            "orderSource": "AVS Integration"
+            "customer_reference": activity_id,  # Required by AVS
+            "subject_first_name": first_name,  # Required by AVS
+            "subject_last_name": last_name,  # Required by AVS
+            "address": address,
+            "address_street": address_parts['street'],  # Required by AVS
+            "address_city": address_parts['city'],  # Required by AVS
+            "address_state": address_parts['state'],  # Required by AVS
+            "address_country": address_parts['country'],  # Required by AVS
+            "visitDate": verification_details.get('visitDate', datetime.utcnow().isoformat() + 'Z'),
+            "addressExists": verification_details.get('addressExists', True),
+            "isResidentialAddress": verification_details.get('isResidentialAddress', True),
+            "isCustomerResidence": verification_details.get('isCustomerResidence', True),
+            "isCustomerKnown": verification_details.get('isCustomerKnown', False),
+            "relationshipWithPersonMet": verification_details.get('relationshipWithPersonMet', 'Not specified'),
+            "nameOfPersonMet": verification_details.get('nameOfPersonMet', 'Name not given'),
+            "easeOfLocation": verification_details.get('easeOfLocation', 'Medium'),
+            "comments": verification_details.get('comments', ''),
+            "additionalComments": verification_details.get('additionalComments', ''),
+            "receivedDate": datetime.utcnow().isoformat() + 'Z',
+            "metOthers": verification_details.get('metOthers', False),
+            "verificationStatus": verification_details.get('verificationStatus', VerificationStatus.SUCCESS.value),
+            "addressMedia": address_media,
+            "reportUrl": verification_details.get('reportUrl', '')
         }
 
-        # Step 3: Create order in Shipday
-        order_result = self.shipday.create_order(order_payload)
+        return response
 
-        if not order_result["success"]:
+    @staticmethod
+    def _parse_name(full_name: str) -> tuple:
+        """
+        Parse full name into first and last name
+
+        Args:
+            full_name: Full name string
+
+        Returns:
+            Tuple of (first_name, last_name)
+        """
+        if not full_name:
+            return ("Unknown", "Unknown")
+
+        parts = full_name.strip().split()
+        if len(parts) == 0:
+            return ("Unknown", "Unknown")
+        elif len(parts) == 1:
+            return (parts[0], parts[0])
+        else:
+            # First part is first name, rest is last name
+            first_name = parts[0]
+            last_name = ' '.join(parts[1:])
+            return (first_name, last_name)
+
+    @staticmethod
+    def _parse_address(address: str) -> Dict[str, str]:
+        """
+        Parse address string into components
+
+        Args:
+            address: Full address string
+
+        Returns:
+            Dictionary with street, city, state, country
+        """
+        if not address:
             return {
-                "success": False,
-                "stage": "order_creation",
-                "error": order_result["error"],
-                "verified_address": verified.to_dict()
+                'street': 'Unknown',
+                'city': 'Unknown',
+                'state': 'Unknown',
+                'country': 'Nigeria'
             }
 
-        return {
-            "success": True,
-            "verification": {
-                "confidence_score": verification.confidence_score,
-                "original_address": verification.original_address,
-                "verified_address": verified.to_dict()
-            },
-            "order": order_result["data"]
+        # Split address by commas
+        parts = [p.strip() for p in address.split(',')]
+
+        # Default values
+        result = {
+            'street': parts[0] if len(parts) > 0 else 'Unknown',
+            'city': 'Unknown',
+            'state': 'Unknown',
+            'country': 'Nigeria'
         }
 
-    def process_delivery_completion(self, order_id: str, photo_url: str,
-                                     signature_url: Optional[str] = None,
-                                     notes: Optional[str] = None) -> Dict[str, Any]:
+        # Try to extract city, state, country
+        if len(parts) >= 2:
+            result['city'] = parts[1] if parts[1] else 'Unknown'
+        if len(parts) >= 3:
+            result['state'] = parts[2] if parts[2] else 'Unknown'
+        if len(parts) >= 4:
+            result['country'] = parts[3] if parts[3] else 'Nigeria'
+
+        # Common patterns for Nigerian addresses
+        address_lower = address.lower()
+
+        # Extract city from common patterns
+        if 'lagos' in address_lower and result['city'] == 'Unknown':
+            result['city'] = 'Lagos'
+            result['state'] = 'Lagos'
+        elif 'abuja' in address_lower and result['city'] == 'Unknown':
+            result['city'] = 'Abuja'
+            result['state'] = 'FCT'
+        elif 'ikeja' in address_lower and result['city'] == 'Unknown':
+            result['city'] = 'Ikeja'
+            result['state'] = 'Lagos'
+        elif 'port harcourt' in address_lower and result['city'] == 'Unknown':
+            result['city'] = 'Port Harcourt'
+            result['state'] = 'Rivers'
+
+        # Always default to Nigeria if country not specified
+        if 'nigeria' in address_lower or result['country'] == 'Unknown':
+            result['country'] = 'Nigeria'
+
+        return result
+
+    # ==================== SHIPDAY API METHODS ====================
+
+    def get_shipday_order(self, order_id: str) -> Optional[Dict]:
         """
-        Process delivery completion with photo proof.
+        Get order details from Shipday
 
         Args:
             order_id: Shipday order ID
-            photo_url: URL of proof of delivery photo
-            signature_url: Optional URL of customer signature
-            notes: Optional delivery notes
 
         Returns:
-            Result of completion processing
+            Order details or None
         """
-        results = {"order_id": order_id, "photos": [], "status_update": None}
+        try:
+            headers = {
+                "Authorization": f"Basic {self.shipday_api_key}",
+                "Content-Type": "application/json"
+            }
 
-        # Upload proof of delivery photo
-        photo_result = self.shipday.upload_delivery_photo(
-            order_id, photo_url, "proof_of_delivery"
-        )
-        results["photos"].append({
-            "type": "proof_of_delivery",
-            "success": photo_result["success"],
-            "data": photo_result.get("data"),
-            "error": photo_result.get("error")
-        })
-
-        # Upload signature if provided
-        if signature_url:
-            sig_result = self.shipday.upload_delivery_photo(
-                order_id, signature_url, "signature"
+            response = requests.get(
+                f"{self.shipday_base_url}/orders/{order_id}",
+                headers=headers
             )
-            results["photos"].append({
-                "type": "signature",
-                "success": sig_result["success"],
-                "data": sig_result.get("data"),
-                "error": sig_result.get("error")
-            })
 
-        # Update order status to delivered
-        status_result = self.shipday.update_order_status(
-            order_id, "DELIVERED", notes
-        )
-        results["status_update"] = status_result
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Error fetching Shipday order: {response.status_code}")
+                return None
 
-        results["success"] = all(p["success"] for p in results["photos"]) and status_result["success"]
+        except Exception as e:
+            print(f"Exception fetching Shipday order: {str(e)}")
+            return None
 
-        return results
+    def list_completed_orders(self, start_date: str = None, end_date: str = None) -> List[Dict]:
+        """
+        List completed orders from Shipday within date range
 
-    def _format_phone(self, phone: str) -> str:
-        """Format phone number to standard format."""
-        digits = re.sub(r'\D', '', phone)
-        if len(digits) == 10:
-            return f"+1{digits}"
-        elif len(digits) == 11 and digits.startswith('1'):
-            return f"+{digits}"
-        return phone
+        Args:
+            start_date: Start date in ISO format
+            end_date: End date in ISO format
 
+        Returns:
+            List of completed orders
+        """
+        try:
+            headers = {
+                "Authorization": f"Basic {self.shipday_api_key}",
+                "Content-Type": "application/json"
+            }
 
-# Convenience function for quick verification
-def verify_address(address: str, api_key: Optional[str] = None) -> VerificationResult:
-    """Quick address verification helper."""
-    client = AVSClient(api_key)
-    return client.verify_address(address)
+            params = {
+                "status": "completed"
+            }
 
+            if start_date:
+                params["startDate"] = start_date
+            if end_date:
+                params["endDate"] = end_date
 
-if __name__ == "__main__":
-    # Example usage
-    import json
+            response = requests.get(
+                f"{self.shipday_base_url}/orders",
+                headers=headers,
+                params=params
+            )
 
-    # Test address verification
-    test_address = "1600 Amphitheatre Parkway, Mountain View, CA"
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Error listing orders: {response.status_code}")
+                return []
 
-    print("Testing AVS-Shipday Integration")
-    print("=" * 50)
+        except Exception as e:
+            print(f"Exception listing orders: {str(e)}")
+            return []
 
-    try:
-        result = verify_address(test_address)
-        print(f"\nVerification Result:")
-        print(f"  Valid: {result.is_valid}")
-        print(f"  Confidence: {result.confidence_score}")
-        if result.verified_address:
-            print(f"  Address: {result.verified_address.format_full()}")
-            print(f"  Coordinates: ({result.verified_address.latitude}, {result.verified_address.longitude})")
-    except ValueError as e:
-        print(f"Configuration error: {e}")
-        print("Please set GOOGLE_MAPS_API_KEY environment variable")
+    # ==================== UTILITY METHODS ====================
+
+    @staticmethod
+    def encode_image_to_base64(image_path: str) -> str:
+        """
+        Encode image file to base64 string
+
+        Args:
+            image_path: Path to image file
+
+        Returns:
+            Base64 encoded string
+        """
+        try:
+            with open(image_path, 'rb') as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8')
+        except Exception as e:
+            print(f"Error encoding image: {str(e)}")
+            return ""
+
+    @staticmethod
+    def validate_avs_payload(payload: Dict) -> tuple[bool, List[str]]:
+        """
+        Validate AVS payload against requirements
+
+        Args:
+            payload: The payload to validate
+
+        Returns:
+            Tuple of (is_valid, list_of_errors)
+        """
+        errors = []
+
+        # Validate vendorId
+        if not payload.get('vendorId'):
+            errors.append("vendorId is required")
+
+        # Validate addressVerificationResponses
+        responses = payload.get('addressVerificationResponses', [])
+        if not responses:
+            errors.append("addressVerificationResponses must contain at least one record")
+
+        for idx, response in enumerate(responses):
+            prefix = f"Response[{idx}]"
+
+            # Required fields
+            required_fields = {
+                'activityId': None,
+                'customerName': 150,
+                'address': 300,
+                'visitDate': None,
+                'addressExists': None,
+                'isResidentialAddress': None,
+                'isCustomerResidence': None,
+                'isCustomerKnown': None,
+                'relationshipWithPersonMet': 50,
+                'nameOfPersonMet': 150,
+                'easeOfLocation': 100,
+                'receivedDate': None,
+                'metOthers': None,
+                'verificationStatus': None,
+                'addressMedia': None,
+                'reportUrl': None
+            }
+
+            for field, max_length in required_fields.items():
+                if field not in response or response[field] is None:
+                    errors.append(f"{prefix}.{field} is required")
+                elif max_length and isinstance(response[field], str):
+                    if len(response[field]) > max_length:
+                        errors.append(f"{prefix}.{field} exceeds max length of {max_length}")
+
+            # Validate addressMedia
+            media = response.get('addressMedia', [])
+            if not media:
+                errors.append(f"{prefix}.addressMedia is required (regulatory requirement)")
+            else:
+                for media_idx, item in enumerate(media):
+                    media_prefix = f"{prefix}.addressMedia[{media_idx}]"
+                    if not item.get('fileName'):
+                        errors.append(f"{media_prefix}.fileName is required")
+                    if not item.get('contentBase64'):
+                        errors.append(f"{media_prefix}.contentBase64 is required")
+                    if not item.get('contentType'):
+                        errors.append(f"{media_prefix}.contentType is required")
+                    if not item.get('mediaType'):
+                        errors.append(f"{media_prefix}.mediaType is required")
+
+            # Validate reportUrl format
+            report_url = response.get('reportUrl', '')
+            if report_url and not (report_url.startswith('http://') or report_url.startswith('https://')):
+                errors.append(f"{prefix}.reportUrl must be a valid absolute URL")
+
+        return len(errors) == 0, errors
