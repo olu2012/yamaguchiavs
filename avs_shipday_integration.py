@@ -159,7 +159,17 @@ class AVSShipdayIntegration:
             print(f"[Shipday] Response Body: {response.text[:500] if response.text else 'empty'}")
 
             if response.status_code in [200, 201]:
-                return response.json()
+                try:
+                    result = response.json()
+                    # Check if Shipday reported success
+                    if result.get('success') == True:
+                        return result
+                    else:
+                        print(f"[Shipday] API returned success=false: {result}")
+                        return None
+                except Exception as json_err:
+                    print(f"[Shipday] Failed to parse JSON: {json_err}, raw: {response.text[:200]}")
+                    return None
             else:
                 print(f"Error creating Shipday order: {response.status_code} - {response.text}")
                 return None

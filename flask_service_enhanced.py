@@ -1091,6 +1091,40 @@ def test_shipday():
         }), 500
 
 
+@app.route("/api/v1/debug/test-avs-webhook", methods=["POST"])
+@require_api_key
+def test_avs_webhook():
+    """Test AVS webhook with detailed error reporting."""
+    try:
+        integration = get_integration()
+
+        test_data = {
+            "vendorId": "C165A237-6AD4-4145-9F07-B1A06A60F7D1",
+            "addressVerificationResponses": [{
+                "activityId": "DEBUG-TEST-" + datetime.utcnow().strftime("%Y%m%d%H%M%S"),
+                "customerName": "Debug Test Customer",
+                "address": "123 Debug Street, Lagos, Nigeria",
+                "visitDate": "2026-01-29T10:00:00Z",
+                "additionalComments": "Debug test"
+            }]
+        }
+
+        # Call the integration method directly
+        result = integration.handle_avs_request(test_data)
+
+        return jsonify({
+            "test_data": test_data,
+            "result": result,
+            "integration_shipday_key_preview": integration.shipday_api_key[:10] + "..." if integration.shipday_api_key else "NOT SET"
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @app.route("/api/v1/verification-statuses", methods=["GET"])
 def get_verification_statuses():
     """Get list of valid verification statuses.
