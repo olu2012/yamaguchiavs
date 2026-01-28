@@ -240,6 +240,7 @@ def root():
             "docs": "/docs",
             "avs_webhook": "/api/v1/avs/webhook",
             "submit_verification": "/api/v1/avs/submit-verification",
+            "vendor_submit": "/vendor/address-verification/submit",
             "get_order": "/api/v1/orders/<order_id>",
             "list_orders": "/api/v1/orders",
             "shipday_webhook": "/webhooks/shipday"
@@ -553,6 +554,219 @@ def validate_avs_payload():
         "valid": is_valid,
         "errors": errors
     })
+
+
+# ==================== VENDOR ENDPOINT (Legacy) ====================
+
+@app.route("/vendor/address-verification/submit", methods=["POST"])
+@require_api_key
+def vendor_address_verification_submit():
+    """Submit address verification response (Legacy endpoint).
+
+    This endpoint receives completed verification results and submits them to AVS.
+    ---
+    tags:
+      - AVS Integration
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - vendorId
+            - addressVerificationResponses
+          properties:
+            vendorId:
+              type: string
+              description: Vendor ID (GUID)
+              example: "9773FC2D-8DC2-40E6-B272-71AC04719FBD"
+            addressVerificationResponses:
+              type: array
+              items:
+                type: object
+                required:
+                  - activityId
+                  - customerName
+                  - address
+                  - visitDate
+                  - addressExists
+                  - isResidentialAddress
+                  - isCustomerResidence
+                  - isCustomerKnown
+                  - relationshipWithPersonMet
+                  - nameOfPersonMet
+                  - easeOfLocation
+                  - receivedDate
+                  - metOthers
+                  - verificationStatus
+                  - addressMedia
+                  - reportUrl
+                properties:
+                  activityId:
+                    type: string
+                  customerName:
+                    type: string
+                  address:
+                    type: string
+                  visitDate:
+                    type: string
+                  addressExists:
+                    type: boolean
+                  isResidentialAddress:
+                    type: boolean
+                  isCustomerResidence:
+                    type: boolean
+                  isCustomerKnown:
+                    type: boolean
+                  relationshipWithPersonMet:
+                    type: string
+                  nameOfPersonMet:
+                    type: string
+                  easeOfLocation:
+                    type: string
+                  comments:
+                    type: string
+                  additionalComments:
+                    type: string
+                  receivedDate:
+                    type: string
+                  metOthers:
+                    type: boolean
+                  verificationStatus:
+                    type: integer
+                    description: "1=PENDING, 2=SUCCESS, 3=FAILED, 4=RETURNED"
+                  addressMedia:
+                    type: array
+                    items:
+                      type: object
+                  reportUrl:
+                    type: string
+    responses:
+      200:
+        description: Verification submitted successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            status_code:
+              type: integer
+            message:
+              type: string
+      400:
+        description: Bad request - missing required fields or validation failed
+      401:
+        description: Unauthorized
+      500:
+        description: Server error
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({
+            "success": False,
+            "status_code": 400,
+            "message": "Request body is required"
+        }), 400
+
+    vendor_id = data.get("vendorId")
+    verification_responses = data.get("addressVerificationResponses", [])
+
+    if not vendor_id:
+        return jsonify({
+            "success": False,
+            "status_code": 400,
+            "message": "vendorId is required"
+        }), 400
+
+    if not verification_responses:
+        return jsonify({
+            "success": False,
+            "status_code": 400,
+            "message": "addressVerificationResponses is required and must not be empty"
+        }), 400
+
+    # Validate the payload
+    is_valid, errors = AVSShipdayIntegration.validate_avs_payload(data)
+    if not is_valid:
+        return jsonify({
+            "success": False,
+            "status_code": 400,
+            "message": "Validation failed",
+            "errors": errors
+        }), 400
+
+    try:
+        integration = get_integration()
+
+        # Process each verification response
+        results = []
+        for response in verification_responses:
+            activity_id = response.get("activityId")
+
+            # Build verification details from the response
+            verification_details = {
+                "customerName": response.get("customerName", ""),
+                "address": response.get("address", ""),
+                "visitDate": response.get("visitDate", ""),
+                "addressExists": response.get("addressExists", True),
+                "isResidentialAddress": response.get("isResidentialAddress", True),
+                "isCustomerResidence": response.get("isCustomerResidence", True),
+                "isCustomerKnown": response.get("isCustomerKnown", False),
+                "relationshipWithPersonMet": response.get("relationshipWithPersonMet", ""),
+                "nameOfPersonMet": response.get("nameOfPersonMet", ""),
+                "easeOfLocation": response.get("easeOfLocation", "Medium"),
+                "comments": response.get("comments", ""),
+                "additionalComments": response.get("additionalComments", ""),
+                "metOthers": response.get("metOthers", False),
+                "verificationStatus": response.get("verificationStatus", VerificationStatus.SUCCESS.value),
+                "reportUrl": response.get("reportUrl", ""),
+                "photos": []  # Convert addressMedia to photos format if needed
+            }
+
+            # Convert addressMedia to photos format
+            address_media = response.get("addressMedia", [])
+            for media in address_media:
+                verification_details["photos"].append({
+                    "fileName": media.get("fileName", "photo.jpg"),
+                    "base64Content": media.get("contentBase64", ""),
+                    "contentType": media.get("contentType", "image/jpeg"),
+                    "caption": media.get("caption", ""),
+                    "timestamp": media.get("takenAt", ""),
+                    "latitude": media.get("latitude", ""),
+                    "longitude": media.get("longitude", "")
+                })
+
+            # Submit to AVS
+            result = integration.submit_verification_result(
+                activity_id=activity_id,
+                shipday_order_data={},
+                verification_details=verification_details
+            )
+            results.append({
+                "activityId": activity_id,
+                "result": result
+            })
+
+        # Check if all submissions were successful
+        all_success = all(r["result"].get("success", False) for r in results)
+
+        return jsonify({
+            "success": all_success,
+            "status_code": 200 if all_success else 207,
+            "message": "All verifications submitted successfully" if all_success else "Some verifications failed",
+            "results": results
+        }), 200 if all_success else 207
+
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "status_code": 500,
+            "message": str(e)
+        }), 500
 
 
 # ==================== ORDER MANAGEMENT ENDPOINTS ====================
