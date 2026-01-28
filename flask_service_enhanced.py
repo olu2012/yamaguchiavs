@@ -1034,31 +1034,36 @@ def test_shipday():
       200:
         description: Shipday test result
     """
-    try:
-        integration = get_integration()
+    import requests as req
 
-        # Test payload
-        test_request = {
-            "activityId": "SHIPDAY-TEST-001",
+    try:
+        # Test directly with Shipday API
+        shipday_api_key = SHIPDAY_API_KEY
+        shipday_url = "https://api.shipday.com/orders"
+
+        test_payload = {
+            "orderNumber": "TEST-ORDER-001",
             "customerName": "Test Customer",
-            "address": "123 Test Street, Lagos, Nigeria",
-            "visitDate": "2026-01-29T10:00:00Z",
-            "additionalComments": "Test order"
+            "customerAddress": "123 Test Street, Lagos, Nigeria",
+            "customerPhoneNumber": "+2348012345678",
+            "customerEmail": "test@example.com",
+            "orderItem": "Address Verification Test",
+            "orderSource": "AVS Integration"
         }
 
-        result = integration._create_shipday_order(test_request)
+        headers = {
+            "Authorization": f"Basic {shipday_api_key}",
+            "Content-Type": "application/json"
+        }
 
-        if result:
-            return jsonify({
-                "success": True,
-                "message": "Shipday order created",
-                "order": result
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": "Failed to create Shipday order - check logs"
-            })
+        response = req.post(shipday_url, headers=headers, json=test_payload, timeout=30)
+
+        return jsonify({
+            "shipday_url": shipday_url,
+            "shipday_api_key_preview": shipday_api_key[:10] + "..." if shipday_api_key else "NOT SET",
+            "status_code": response.status_code,
+            "response_body": response.text[:1000] if response.text else "empty"
+        })
     except Exception as e:
         return jsonify({
             "success": False,
