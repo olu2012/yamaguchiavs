@@ -187,12 +187,14 @@ class AVSShipdayIntegration:
             Response from AVS API
         """
         try:
-            # Construct AVS response payload
+            # Construct AVS response payload - wrapped in 'request' as required by AVS API
             avs_payload = {
-                "vendorId": self.avs_vendor_id,
-                "addressVerificationResponses": [
-                    self._build_avs_response(activity_id, shipday_order_data, verification_details)
-                ]
+                "request": {
+                    "vendorId": self.avs_vendor_id,
+                    "addressVerificationResponses": [
+                        self._build_avs_response(activity_id, shipday_order_data, verification_details)
+                    ]
+                }
             }
 
             # Prepare headers
