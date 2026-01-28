@@ -994,6 +994,30 @@ def handle_carrier_location(data: Dict) -> Dict:
 
 # ==================== UTILITY ENDPOINTS ====================
 
+@app.route("/api/v1/debug/config", methods=["GET"])
+@require_api_key
+def debug_config():
+    """Debug endpoint to check AVS configuration (remove in production).
+    ---
+    tags:
+      - AVS Integration
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    responses:
+      200:
+        description: Current configuration
+    """
+    return jsonify({
+        "avs_base_url": AVS_BASE_URL,
+        "avs_vendor_id_set": bool(AVS_VENDOR_ID),
+        "avs_vendor_id_preview": AVS_VENDOR_ID[:8] + "..." if AVS_VENDOR_ID and len(AVS_VENDOR_ID) > 8 else "not set",
+        "avs_subscription_key_set": bool(AVS_SUBSCRIPTION_KEY),
+        "shipday_api_key_set": bool(SHIPDAY_API_KEY),
+        "full_avs_endpoint": f"{AVS_BASE_URL}/api/AddressVendor/receive-verification-response"
+    })
+
+
 @app.route("/api/v1/verification-statuses", methods=["GET"])
 def get_verification_statuses():
     """Get list of valid verification statuses.
