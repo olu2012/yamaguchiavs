@@ -202,26 +202,41 @@ class AVSShipdayIntegration:
                 "Ocp-Apim-Subscription-Key": self.avs_subscription_key
             }
 
+            # Build full URL
+            full_url = f"{self.avs_base_url}/api/AddressVendor/receive-verification-response"
+
+            print(f"[AVS] Submitting to: {full_url}")
+            print(f"[AVS] Vendor ID: {self.avs_vendor_id}")
+            print(f"[AVS] Subscription Key (first 8 chars): {self.avs_subscription_key[:8] if self.avs_subscription_key else 'NOT SET'}...")
+
             # Submit to AVS
             response = requests.post(
-                f"{self.avs_base_url}/api/AddressVendor/receive-verification-response",
+                full_url,
                 headers=headers,
                 json=avs_payload
             )
 
+            print(f"[AVS] Response Status: {response.status_code}")
+            print(f"[AVS] Response Body: {response.text[:500] if response.text else 'empty'}")
+
             if response.status_code == 200:
+                try:
+                    response_json = response.json()
+                except:
+                    response_json = {"raw": response.text}
                 return {
                     "success": True,
                     "status_code": 200,
                     "message": "Verification result submitted successfully",
-                    "response": response.json()
+                    "response": response_json
                 }
             else:
                 return {
                     "success": False,
                     "status_code": response.status_code,
                     "message": "Failed to submit verification result",
-                    "error": response.text
+                    "error": response.text,
+                    "url_called": full_url
                 }
 
         except Exception as e:

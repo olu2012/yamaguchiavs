@@ -1013,8 +1013,10 @@ def debug_config():
         "avs_vendor_id_set": bool(AVS_VENDOR_ID),
         "avs_vendor_id_preview": AVS_VENDOR_ID[:8] + "..." if AVS_VENDOR_ID and len(AVS_VENDOR_ID) > 8 else "not set",
         "avs_subscription_key_set": bool(AVS_SUBSCRIPTION_KEY),
+        "avs_subscription_key_preview": AVS_SUBSCRIPTION_KEY[:8] + "..." if AVS_SUBSCRIPTION_KEY and len(AVS_SUBSCRIPTION_KEY) > 8 else "not set",
         "shipday_api_key_set": bool(SHIPDAY_API_KEY),
-        "full_avs_endpoint": f"{AVS_BASE_URL}/api/AddressVendor/receive-verification-response"
+        "full_avs_endpoint": f"{AVS_BASE_URL}/api/AddressVendor/receive-verification-response",
+        "expected_dev_key_starts_with": "b9640d4b"
     })
 
 
