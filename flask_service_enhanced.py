@@ -1041,14 +1041,17 @@ def test_shipday():
         shipday_api_key = SHIPDAY_API_KEY
         shipday_url = "https://api.shipday.com/orders"
 
+        # Shipday API requires specific format
+        # See: https://docs.shipday.com/reference/insert-new-order
         test_payload = {
-            "orderNumber": "TEST-ORDER-001",
+            "orderNumber": "AVS-TEST-" + datetime.utcnow().strftime("%Y%m%d%H%M%S"),
             "customerName": "Test Customer",
             "customerAddress": "123 Test Street, Lagos, Nigeria",
-            "customerPhoneNumber": "+2348012345678",
-            "customerEmail": "test@example.com",
-            "orderItem": "Address Verification Test",
-            "orderSource": "AVS Integration"
+            "customerPhoneNumber": "08012345678",
+            "restaurant": {
+                "name": "AVS Verification Service",
+                "address": "Lagos, Nigeria"
+            }
         }
 
         headers = {
