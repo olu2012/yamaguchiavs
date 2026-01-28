@@ -1054,18 +1054,37 @@ def test_shipday():
             }
         }
 
-        headers = {
+        # Try multiple auth methods
+        results = {}
+
+        # Method 1: Basic auth header
+        headers1 = {
             "Authorization": f"Basic {shipday_api_key}",
             "Content-Type": "application/json"
         }
+        resp1 = req.post(shipday_url, headers=headers1, json=test_payload, timeout=30)
+        results["basic_auth"] = {"status": resp1.status_code, "body": resp1.text[:300]}
 
-        response = req.post(shipday_url, headers=headers, json=test_payload, timeout=30)
+        # Method 2: Bearer auth header
+        headers2 = {
+            "Authorization": f"Bearer {shipday_api_key}",
+            "Content-Type": "application/json"
+        }
+        resp2 = req.post(shipday_url, headers=headers2, json=test_payload, timeout=30)
+        results["bearer_auth"] = {"status": resp2.status_code, "body": resp2.text[:300]}
+
+        # Method 3: API key in header
+        headers3 = {
+            "X-Api-Key": shipday_api_key,
+            "Content-Type": "application/json"
+        }
+        resp3 = req.post(shipday_url, headers=headers3, json=test_payload, timeout=30)
+        results["x_api_key"] = {"status": resp3.status_code, "body": resp3.text[:300]}
 
         return jsonify({
             "shipday_url": shipday_url,
             "shipday_api_key_preview": shipday_api_key[:10] + "..." if shipday_api_key else "NOT SET",
-            "status_code": response.status_code,
-            "response_body": response.text[:1000] if response.text else "empty"
+            "results": results
         })
     except Exception as e:
         return jsonify({
