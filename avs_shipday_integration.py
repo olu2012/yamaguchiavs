@@ -125,18 +125,15 @@ class AVSShipdayIntegration:
             address = verification_request.get('address', '')
             activity_id = verification_request.get('activityId', '')
 
-            # Prepare Shipday order payload
-            # Restaurant name is required by Shipday API
+            # Prepare Shipday order payload - minimal required fields
             shipday_payload = {
-                "orderNumber": activity_id,  # Use activityId as order number
+                "orderNumber": activity_id,
                 "customerName": customer_name,
                 "customerAddress": address,
-                "customerPhoneNumber": verification_request.get('customerPhone', '08000000000'),
+                "customerPhoneNumber": "08000000000",
                 "restaurantName": "AVS Verification HQ",
                 "restaurantAddress": "Victoria Island, Lagos, Nigeria",
-                "restaurantPhoneNumber": "08000000000",
-                "orderItem": f"Address Verification for {customer_name}",
-                "deliveryInstruction": f"Verify address and collect proof. ActivityId: {activity_id}. {verification_request.get('additionalComments', '')}"
+                "restaurantPhoneNumber": "08000000000"
             }
 
             # Make API call to Shipday
