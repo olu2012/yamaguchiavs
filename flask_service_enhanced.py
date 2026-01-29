@@ -673,35 +673,56 @@ def vendor_address_verification_submit():
             "message": "Request body is required"
         }), 400
 
-    vendor_id = data.get("vendorId")
-    verification_responses = data.get("addressVerificationResponses", [])
-
-    if not vendor_id:
-        return jsonify({
-            "success": False,
-            "status_code": 400,
-            "message": "vendorId is required"
-        }), 400
-
-    if not verification_responses:
-        return jsonify({
-            "success": False,
-            "status_code": 400,
-            "message": "addressVerificationResponses is required and must not be empty"
-        }), 400
-
-    # Validate the payload
-    is_valid, errors = AVSShipdayIntegration.validate_avs_payload(data)
-    if not is_valid:
-        return jsonify({
-            "success": False,
-            "status_code": 400,
-            "message": "Validation failed",
-            "errors": errors
-        }), 400
-
     try:
         integration = get_integration()
+
+        # Detect payload format - new AVS format has customer_reference
+        if "customer_reference" in data:
+            # New AVS format - create Shipday order
+            result = integration.handle_avs_request(data)
+
+            if result.get("status") == "success":
+                return jsonify({
+                    "success": True,
+                    "status_code": 200,
+                    "message": result.get("message"),
+                    "reference": result.get("requestId"),
+                    "createdTasks": result.get("createdTasks", [])
+                }), 200
+            else:
+                return jsonify({
+                    "success": False,
+                    "status_code": 400,
+                    "message": result.get("message")
+                }), 400
+
+        # Legacy format - requires vendorId and addressVerificationResponses
+        vendor_id = data.get("vendorId")
+        verification_responses = data.get("addressVerificationResponses", [])
+
+        if not vendor_id:
+            return jsonify({
+                "success": False,
+                "status_code": 400,
+                "message": "vendorId is required"
+            }), 400
+
+        if not verification_responses:
+            return jsonify({
+                "success": False,
+                "status_code": 400,
+                "message": "addressVerificationResponses is required and must not be empty"
+            }), 400
+
+        # Validate the payload
+        is_valid, errors = AVSShipdayIntegration.validate_avs_payload(data)
+        if not is_valid:
+            return jsonify({
+                "success": False,
+                "status_code": 400,
+                "message": "Validation failed",
+                "errors": errors
+            }), 400
 
         # Process each verification response
         results = []
