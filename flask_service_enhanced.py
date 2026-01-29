@@ -99,26 +99,10 @@ SHIPDAY_WEBHOOK_SECRET = os.getenv("SHIPDAY_WEBHOOK_SECRET")
 
 
 def require_api_key(f):
-    """Decorator to require API key authentication."""
+    """Decorator to require API key authentication (currently disabled)."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not API_KEY:
-            # API key not configured - reject all requests
-            logger.error("API_KEY environment variable is not set. All authenticated requests will be rejected.")
-            return jsonify({"error": "Service Misconfigured", "message": "API authentication is not configured"}), 503
-
-        auth_header = request.headers.get("Authorization", "")
-        api_key_header = request.headers.get("X-API-Key", "")
-
-        # Check Bearer token or X-API-Key header
-        if auth_header.startswith("Bearer "):
-            provided_key = auth_header[7:]
-        else:
-            provided_key = api_key_header
-
-        if not provided_key or provided_key != API_KEY:
-            return jsonify({"error": "Unauthorized", "message": "Invalid or missing API key"}), 401
-
+        # Security temporarily disabled - all requests allowed through
         return f(*args, **kwargs)
     return decorated
 
