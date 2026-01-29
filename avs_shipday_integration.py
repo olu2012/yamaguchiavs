@@ -56,6 +56,10 @@ class AVSShipdayIntegration:
         Handle incoming address verification request from AVS
         Creates corresponding tasks in Shipday
 
+        Supports two payload formats:
+        1. Legacy format: { vendorId, addressVerificationResponses: [...] }
+        2. New AVS format: { customer_reference, subject_first_name, address_street, ... }
+
         Args:
             request_data: The JSON payload from AVS
 
@@ -63,27 +67,42 @@ class AVSShipdayIntegration:
             Response dictionary with status and request ID
         """
         try:
-            vendor_id = request_data.get('vendorId')
-            verification_requests = request_data.get('addressVerificationResponses', [])
+            # Detect payload format
+            if 'customer_reference' in request_data:
+                # New AVS format - single verification request
+                verification_request = self._normalize_avs_payload(request_data)
+                verification_requests = [verification_request]
+                activity_id = verification_request.get('activityId')
+            elif 'vendorId' in request_data:
+                # Legacy format
+                vendor_id = request_data.get('vendorId')
+                verification_requests = request_data.get('addressVerificationResponses', [])
 
-            if not vendor_id or not verification_requests:
+                if not vendor_id or not verification_requests:
+                    return {
+                        "status": "error",
+                        "message": "Invalid request: missing vendorId or verification requests",
+                        "requestId": None
+                    }
+                activity_id = verification_requests[0].get('activityId') if verification_requests else None
+            else:
                 return {
                     "status": "error",
-                    "message": "Invalid request: missing vendorId or verification requests",
+                    "message": "Invalid request format: missing customer_reference or vendorId",
                     "requestId": None
                 }
 
             # Process each verification request
             created_tasks = []
             for request in verification_requests:
-                activity_id = request.get('activityId')
+                req_activity_id = request.get('activityId')
 
                 # Create Shipday delivery task
                 shipday_order = self._create_shipday_order(request)
 
                 if shipday_order:
                     created_tasks.append({
-                        'activityId': activity_id,
+                        'activityId': req_activity_id,
                         'shipdayOrderId': shipday_order.get('orderId')
                     })
 
@@ -92,7 +111,7 @@ class AVSShipdayIntegration:
                 return {
                     "status": "success",
                     "message": "AVR request has been submitted successfully. Please track status using the request ID provided.",
-                    "requestId": verification_requests[0].get('activityId'),
+                    "requestId": activity_id,
                     "createdTasks": created_tasks
                 }
             else:
@@ -109,6 +128,57 @@ class AVSShipdayIntegration:
                 "requestId": None
             }
 
+    def _normalize_avs_payload(self, avs_data: Dict) -> Dict:
+        """
+        Normalize new AVS payload format to internal format
+
+        Args:
+            avs_data: New AVS format payload
+
+        Returns:
+            Normalized verification request
+        """
+        # Build customer name from subject fields
+        first_name = avs_data.get('subject_first_name', '')
+        middle_name = avs_data.get('subject_middle_name', '')
+        last_name = avs_data.get('subject_last_name', '')
+
+        name_parts = [first_name, middle_name, last_name]
+        customer_name = ' '.join(part for part in name_parts if part).strip()
+
+        # Build full address from address fields
+        address_parts = []
+        if avs_data.get('address_street'):
+            address_parts.append(avs_data['address_street'])
+        if avs_data.get('address_landmark'):
+            address_parts.append(avs_data['address_landmark'])
+        if avs_data.get('address_lga'):
+            address_parts.append(avs_data['address_lga'])
+        if avs_data.get('address_city'):
+            address_parts.append(avs_data['address_city'])
+        if avs_data.get('address_state'):
+            address_parts.append(avs_data['address_state'])
+        if avs_data.get('address_postal_code'):
+            address_parts.append(avs_data['address_postal_code'])
+        if avs_data.get('address_country'):
+            address_parts.append(avs_data['address_country'])
+
+        full_address = ', '.join(address_parts) if address_parts else 'Address not provided'
+
+        # Get phone number
+        phone = avs_data.get('subject_phone', '08000000000')
+
+        return {
+            'activityId': avs_data.get('customer_reference', ''),
+            'customerName': customer_name or 'Unknown Customer',
+            'address': full_address,
+            'customerPhoneNumber': phone,
+            'visitDate': datetime.utcnow().isoformat() + 'Z',
+            'additionalComments': avs_data.get('verification_type', 'AddressVerification'),
+            # Preserve original data for reference
+            'originalPayload': avs_data
+        }
+
     def _create_shipday_order(self, verification_request: Dict) -> Optional[Dict]:
         """
         Create a delivery order in Shipday based on AVS verification request
@@ -124,13 +194,14 @@ class AVSShipdayIntegration:
             customer_name = verification_request.get('customerName', '')
             address = verification_request.get('address', '')
             activity_id = verification_request.get('activityId', '')
+            phone = verification_request.get('customerPhoneNumber', '08000000000')
 
             # Prepare Shipday order payload - minimal required fields
             shipday_payload = {
                 "orderNumber": activity_id,
                 "customerName": customer_name,
                 "customerAddress": address,
-                "customerPhoneNumber": "08000000000",
+                "customerPhoneNumber": phone,
                 "restaurantName": "AVS Verification HQ",
                 "restaurantAddress": "Victoria Island, Lagos, Nigeria",
                 "restaurantPhoneNumber": "08000000000"
