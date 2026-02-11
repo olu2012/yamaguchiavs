@@ -152,6 +152,8 @@ def verify_shipday_webhook(f):
 
         if not token_valid:
             logger.warning("Invalid webhook token received")
+            logger.warning(f"DEBUG - All headers: {dict(request.headers)}")
+            logger.warning(f"DEBUG - Tokens found: X-Webhook-Token='{webhook_token}', X-Shipday-Signature='{shipday_signature}', Authorization='{auth_header}'")
             return jsonify({"error": "Unauthorized", "message": "Invalid or missing webhook token"}), 401
 
         return f(*args, **kwargs)
