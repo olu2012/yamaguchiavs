@@ -133,6 +133,7 @@ def verify_shipday_webhook(f):
 
         # Check multiple headers for the webhook token
         webhook_token = request.headers.get("X-Webhook-Token", "")
+        shipday_token = request.headers.get("Token", "")
         shipday_signature = request.headers.get("X-Shipday-Signature", "")
         auth_header = request.headers.get("Authorization", "")
 
@@ -144,7 +145,7 @@ def verify_shipday_webhook(f):
             auth_token = auth_header
 
         # Check if any of the provided tokens match the secret
-        provided_tokens = [webhook_token, shipday_signature, auth_token]
+        provided_tokens = [webhook_token, shipday_token, shipday_signature, auth_token]
         token_valid = any(
             token and hmac.compare_digest(token, SHIPDAY_WEBHOOK_SECRET)
             for token in provided_tokens
@@ -152,8 +153,6 @@ def verify_shipday_webhook(f):
 
         if not token_valid:
             logger.warning("Invalid webhook token received")
-            logger.warning(f"DEBUG - All headers: {dict(request.headers)}")
-            logger.warning(f"DEBUG - Tokens found: X-Webhook-Token='{webhook_token}', X-Shipday-Signature='{shipday_signature}', Authorization='{auth_header}'")
             return jsonify({"error": "Unauthorized", "message": "Invalid or missing webhook token"}), 401
 
         return f(*args, **kwargs)
