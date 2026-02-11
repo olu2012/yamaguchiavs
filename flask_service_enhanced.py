@@ -930,8 +930,10 @@ def shipday_webhook():
     if not data:
         return jsonify({"error": "Bad Request", "message": "No payload"}), 400
 
-    event_type = data.get("event")
+    event_type = data.get("event") or data.get("eventType") or data.get("orderStatus")
     logger.info(f"Received Shipday webhook: {event_type}")
+    logger.info(f"DEBUG - Webhook payload keys: {list(data.keys())}")
+    logger.info(f"DEBUG - Webhook payload: {data}")
 
     # Process different event types
     handlers = {
