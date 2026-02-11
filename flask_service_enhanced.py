@@ -930,18 +930,16 @@ def shipday_webhook():
     if not data:
         return jsonify({"error": "Bad Request", "message": "No payload"}), 400
 
-    event_type = data.get("event") or data.get("eventType") or data.get("orderStatus")
+    event_type = data.get("event")
     logger.info(f"Received Shipday webhook: {event_type}")
-    logger.info(f"DEBUG - Webhook payload keys: {list(data.keys())}")
-    logger.info(f"DEBUG - Webhook payload: {data}")
 
-    # Process different event types
+    # Process different event types (Shipday uses uppercase event names)
     handlers = {
-        "order.status.changed": handle_status_change,
-        "order.assigned": handle_order_assigned,
-        "order.picked_up": handle_order_picked_up,
-        "order.delivered": handle_order_delivered,
-        "carrier.location.updated": handle_carrier_location
+        "ORDER_ASSIGNED": handle_order_assigned,
+        "ORDER_PICKED_UP": handle_order_picked_up,
+        "ORDER_DELIVERED": handle_order_delivered,
+        "ORDER_FAILED": handle_order_failed,
+        "ORDER_STATUS_CHANGED": handle_status_change,
     }
 
     handler = handlers.get(event_type)
@@ -959,62 +957,79 @@ def shipday_webhook():
 
 def handle_status_change(data: Dict) -> Dict:
     """Handle order status change event."""
-    order_id = data.get("orderId")
-    new_status = data.get("newStatus")
-    old_status = data.get("oldStatus")
+    order = data.get("order", {})
+    order_id = order.get("id")
+    order_number = order.get("order_number")
+    order_status = data.get("order_status")
 
-    logger.info(f"Order {order_id} status changed: {old_status} -> {new_status}")
+    logger.info(f"Order {order_id} ({order_number}) status changed to: {order_status}")
 
-    # If order is delivered, we might want to auto-submit verification to AVS
-    if new_status == "DELIVERED":
-        logger.info(f"Order {order_id} delivered - verification can be submitted to AVS")
-
-    return {"order_id": order_id, "new_status": new_status}
+    return {"order_id": order_id, "order_number": order_number, "status": order_status}
 
 
 def handle_order_assigned(data: Dict) -> Dict:
     """Handle order assigned to carrier event."""
-    order_id = data.get("orderId")
-    carrier = data.get("carrier", {})
+    order = data.get("order", {})
+    order_id = order.get("id")
+    order_number = order.get("order_number")
+    delivery = data.get("delivery_details", {})
 
-    logger.info(f"Order {order_id} assigned to carrier {carrier.get('name')}")
+    logger.info(f"Order {order_id} ({order_number}) assigned - delivering to {delivery.get('name')}")
 
-    return {"order_id": order_id, "carrier": carrier.get("name")}
+    return {"order_id": order_id, "order_number": order_number, "delivery_to": delivery.get("name")}
 
 
 def handle_order_picked_up(data: Dict) -> Dict:
     """Handle order picked up event."""
-    order_id = data.get("orderId")
-    pickup_time = data.get("timestamp")
+    order = data.get("order", {})
+    order_id = order.get("id")
+    order_number = order.get("order_number")
+    timestamp = data.get("timestamp")
+    pickup = data.get("pickup_details", {})
 
-    logger.info(f"Order {order_id} picked up at {pickup_time}")
+    logger.info(f"Order {order_id} ({order_number}) picked up from {pickup.get('name')}")
 
-    return {"order_id": order_id, "pickup_time": pickup_time}
+    return {"order_id": order_id, "order_number": order_number, "pickup_time": timestamp}
 
 
 def handle_order_delivered(data: Dict) -> Dict:
     """Handle order delivered event."""
-    order_id = data.get("orderId")
-    delivery_time = data.get("timestamp")
-    proof_photos = data.get("proofPhotos", [])
+    order = data.get("order", {})
+    order_id = order.get("id")
+    order_number = order.get("order_number")
+    timestamp = data.get("timestamp")
+    pods = data.get("pods", [])
+    delivery = data.get("delivery_details", {})
 
-    logger.info(f"Order {order_id} delivered at {delivery_time} with {len(proof_photos)} photos")
+    logger.info(f"Order {order_id} ({order_number}) delivered to {delivery.get('name')} with {len(pods)} proof photos")
 
     return {
         "order_id": order_id,
-        "delivery_time": delivery_time,
-        "photo_count": len(proof_photos)
+        "order_number": order_number,
+        "delivery_time": timestamp,
+        "photo_count": len(pods),
+        "delivery_address": delivery.get("address")
     }
 
 
-def handle_carrier_location(data: Dict) -> Dict:
-    """Handle carrier location update event."""
-    carrier_id = data.get("carrierId")
-    location = data.get("location", {})
+def handle_order_failed(data: Dict) -> Dict:
+    """Handle order failed event."""
+    order = data.get("order", {})
+    order_id = order.get("id")
+    order_number = order.get("order_number")
+    order_status = data.get("order_status")
+    delivery = data.get("delivery_details", {})
+    delivery_note = data.get("delivery_note", "")
 
-    logger.debug(f"Carrier {carrier_id} location: {location}")
+    logger.warning(f"Order {order_id} ({order_number}) FAILED - status: {order_status}, delivery to: {delivery.get('name')}, note: {delivery_note}")
 
-    return {"carrier_id": carrier_id, "location": location}
+    return {
+        "order_id": order_id,
+        "order_number": order_number,
+        "status": order_status,
+        "delivery_name": delivery.get("name"),
+        "delivery_note": delivery_note
+    }
 
 
 # ==================== UTILITY ENDPOINTS ====================
