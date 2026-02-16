@@ -538,6 +538,30 @@ class AVSShipdayIntegration:
     # ==================== UTILITY METHODS ====================
 
     @staticmethod
+    def download_image_to_base64(image_url: str) -> tuple:
+        """
+        Download an image from a URL and convert to base64.
+
+        Args:
+            image_url: URL of the image to download
+
+        Returns:
+            Tuple of (base64_string, content_type) or ("", "") on failure
+        """
+        try:
+            response = requests.get(image_url, timeout=30)
+            if response.status_code == 200:
+                base64_content = base64.b64encode(response.content).decode('utf-8')
+                content_type = response.headers.get('Content-Type', 'image/jpeg')
+                return (base64_content, content_type)
+            else:
+                print(f"[Image] Failed to download {image_url}: HTTP {response.status_code}")
+                return ("", "")
+        except Exception as e:
+            print(f"[Image] Error downloading {image_url}: {str(e)}")
+            return ("", "")
+
+    @staticmethod
     def encode_image_to_base64(image_path: str) -> str:
         """
         Encode image file to base64 string

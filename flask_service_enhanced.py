@@ -985,42 +985,177 @@ def handle_order_picked_up(data: Dict) -> Dict:
 
 
 def handle_order_delivered(data: Dict) -> Dict:
-    """Handle order delivered event."""
+    """Handle order delivered event - auto-submit verification result to AVS."""
     order = data.get("order", {})
     order_id = order.get("id")
     order_number = order.get("order_number")
     timestamp = data.get("timestamp")
     pods = data.get("pods", [])
     delivery = data.get("delivery_details", {})
+    delivery_note = data.get("delivery_note", "")
+    tracking_url = data.get("trackingUrl", "")
 
     logger.info(f"Order {order_id} ({order_number}) delivered to {delivery.get('name')} with {len(pods)} proof photos")
+
+    # order_number IS the activityId (Phase 1 sets orderNumber = activityId)
+    activity_id = order_number
+
+    if not activity_id:
+        logger.error(f"Order {order_id} has no order_number, cannot submit to AVS")
+        return {"order_id": order_id, "error": "No order_number/activityId"}
+
+    # Convert timestamp (epoch ms) to ISO format
+    visit_date = datetime.utcnow().isoformat() + 'Z'
+    if timestamp:
+        try:
+            visit_date = datetime.utcfromtimestamp(int(timestamp) / 1000).isoformat() + 'Z'
+        except (ValueError, TypeError, OSError):
+            pass
+
+    # Process proof-of-delivery photos
+    photos = []
+    try:
+        integration = get_integration()
+        for idx, pod_url in enumerate(pods):
+            if isinstance(pod_url, str) and pod_url.startswith("http"):
+                base64_content, content_type = AVSShipdayIntegration.download_image_to_base64(pod_url)
+                if base64_content:
+                    photos.append({
+                        "fileName": f"pod_{idx + 1}.jpg",
+                        "base64Content": base64_content,
+                        "contentType": content_type,
+                        "latitude": "",
+                        "longitude": ""
+                    })
+    except Exception as e:
+        logger.error(f"Error processing POD photos: {e}")
+        integration = get_integration()
+
+    # Build verification details
+    verification_details = {
+        "customerName": delivery.get("name", ""),
+        "address": delivery.get("address", ""),
+        "visitDate": visit_date,
+        "verificationStatus": VerificationStatus.SUCCESS.value,
+        "comments": delivery_note or "Verification completed - order delivered successfully",
+        "reportUrl": tracking_url or "",
+        "addressExists": True,
+        "isResidentialAddress": True,
+        "isCustomerResidence": True,
+        "isCustomerKnown": True,
+        "relationshipWithPersonMet": "Self",
+        "nameOfPersonMet": delivery.get("name", "Not specified"),
+        "easeOfLocation": "Medium",
+        "photos": photos
+    }
+
+    # Submit to AVS
+    logger.info(f"[Phase 2] Submitting delivered result to AVS for activityId: {activity_id}")
+    avs_result = integration.submit_verification_result(
+        activity_id=activity_id,
+        shipday_order_data={},
+        verification_details=verification_details
+    )
+    logger.info(f"[Phase 2] AVS submission result: success={avs_result.get('success')}, status={avs_result.get('status_code')}")
 
     return {
         "order_id": order_id,
         "order_number": order_number,
         "delivery_time": timestamp,
         "photo_count": len(pods),
-        "delivery_address": delivery.get("address")
+        "delivery_address": delivery.get("address"),
+        "avs_submitted": avs_result.get("success", False),
+        "avs_status_code": avs_result.get("status_code")
     }
 
 
 def handle_order_failed(data: Dict) -> Dict:
-    """Handle order failed event."""
+    """Handle order failed event - auto-submit failed verification to AVS."""
     order = data.get("order", {})
     order_id = order.get("id")
     order_number = order.get("order_number")
     order_status = data.get("order_status")
     delivery = data.get("delivery_details", {})
     delivery_note = data.get("delivery_note", "")
+    timestamp = data.get("timestamp")
+    tracking_url = data.get("trackingUrl", "")
+    pods = data.get("pods", [])
 
     logger.warning(f"Order {order_id} ({order_number}) FAILED - status: {order_status}, delivery to: {delivery.get('name')}, note: {delivery_note}")
+
+    # order_number IS the activityId
+    activity_id = order_number
+
+    if not activity_id:
+        logger.error(f"Order {order_id} has no order_number, cannot submit to AVS")
+        return {"order_id": order_id, "error": "No order_number/activityId"}
+
+    # Convert timestamp (epoch ms) to ISO format
+    visit_date = datetime.utcnow().isoformat() + 'Z'
+    if timestamp:
+        try:
+            visit_date = datetime.utcfromtimestamp(int(timestamp) / 1000).isoformat() + 'Z'
+        except (ValueError, TypeError, OSError):
+            pass
+
+    # Process any proof-of-delivery photos (may have none for failed orders)
+    photos = []
+    try:
+        integration = get_integration()
+        for idx, pod_url in enumerate(pods):
+            if isinstance(pod_url, str) and pod_url.startswith("http"):
+                base64_content, content_type = AVSShipdayIntegration.download_image_to_base64(pod_url)
+                if base64_content:
+                    photos.append({
+                        "fileName": f"pod_{idx + 1}.jpg",
+                        "base64Content": base64_content,
+                        "contentType": content_type,
+                        "latitude": "",
+                        "longitude": ""
+                    })
+    except Exception as e:
+        logger.error(f"Error processing POD photos: {e}")
+        integration = get_integration()
+
+    # Build failure comments
+    failure_reason = delivery_note or order_status or "Order failed"
+    comments = f"Verification failed - {failure_reason}"
+
+    # Build verification details
+    verification_details = {
+        "customerName": delivery.get("name", ""),
+        "address": delivery.get("address", ""),
+        "visitDate": visit_date,
+        "verificationStatus": VerificationStatus.FAILED.value,
+        "comments": comments,
+        "reportUrl": tracking_url or "",
+        "addressExists": False,
+        "isResidentialAddress": False,
+        "isCustomerResidence": False,
+        "isCustomerKnown": False,
+        "relationshipWithPersonMet": "Not applicable",
+        "nameOfPersonMet": "Not applicable",
+        "easeOfLocation": "Hard",
+        "photos": photos
+    }
+
+    # Submit to AVS
+    logger.info(f"[Phase 2] Submitting failed result to AVS for activityId: {activity_id}")
+    avs_result = integration.submit_verification_result(
+        activity_id=activity_id,
+        shipday_order_data={},
+        verification_details=verification_details
+    )
+    logger.info(f"[Phase 2] AVS submission result: success={avs_result.get('success')}, status={avs_result.get('status_code')}")
 
     return {
         "order_id": order_id,
         "order_number": order_number,
         "status": order_status,
         "delivery_name": delivery.get("name"),
-        "delivery_note": delivery_note
+        "delivery_note": delivery_note,
+        "avs_submitted": avs_result.get("success", False),
+        "avs_status_code": avs_result.get("status_code")
     }
 
 
