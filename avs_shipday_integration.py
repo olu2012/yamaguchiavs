@@ -264,15 +264,12 @@ class AVSShipdayIntegration:
             Response from AVS API
         """
         try:
-            # Construct AVS response payload wrapped in 'request' as required by AVS API
+            # Construct AVS response payload
             avs_response = self._build_avs_response(activity_id, shipday_order_data, verification_details)
 
-            # The AVS API expects the payload wrapped in a 'request' object
             avs_payload = {
-                "request": {
-                    "vendorId": self.avs_vendor_id,
-                    "addressVerificationResponses": [avs_response]
-                }
+                "vendorId": self.avs_vendor_id,
+                "addressVerificationResponses": [avs_response]
             }
 
             # Prepare headers
@@ -351,32 +348,15 @@ class AVSShipdayIntegration:
                     "contentBase64": photo.get('base64Content', ''),
                     "contentType": photo.get('contentType', 'image/jpeg'),
                     "mediaType": MediaType.IMAGE.value,
-                    "caption": photo.get('caption', 'Address verification photo'),
-                    "takenAt": photo.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
                     "latitude": photo.get('latitude', ''),
                     "longitude": photo.get('longitude', '')
                 })
 
-        # Parse customer name into first and last name
-        customer_name = verification_details.get('customerName', '')
-        first_name, last_name = self._parse_name(customer_name)
-
-        # Parse address into components
-        address = verification_details.get('address', '')
-        address_parts = self._parse_address(address)
-
-        # Build response object using camelCase
+        # Build response object with only the 16 required fields
         response = {
             "activityId": activity_id,
-            "customerName": customer_name,
-            "customer_reference": activity_id,
-            "subject_first_name": first_name,
-            "subject_last_name": last_name,
-            "address": address,
-            "address_street": address_parts['street'],
-            "address_city": address_parts['city'],
-            "address_state": address_parts['state'],
-            "address_country": address_parts['country'],
+            "customerName": verification_details.get('customerName', ''),
+            "address": verification_details.get('address', ''),
             "visitDate": verification_details.get('visitDate', datetime.utcnow().isoformat() + 'Z'),
             "addressExists": verification_details.get('addressExists', True),
             "isResidentialAddress": verification_details.get('isResidentialAddress', True),
@@ -386,9 +366,7 @@ class AVSShipdayIntegration:
             "nameOfPersonMet": verification_details.get('nameOfPersonMet', 'Name not given'),
             "easeOfLocation": verification_details.get('easeOfLocation', 'Medium'),
             "comments": verification_details.get('comments', ''),
-            "additionalComments": verification_details.get('additionalComments', ''),
             "receivedDate": datetime.utcnow().isoformat() + 'Z',
-            "metOthers": verification_details.get('metOthers', False),
             "verificationStatus": verification_details.get('verificationStatus', VerificationStatus.SUCCESS.value),
             "addressMedia": address_media,
             "reportUrl": verification_details.get('reportUrl', '')
@@ -615,8 +593,8 @@ class AVSShipdayIntegration:
                 'relationshipWithPersonMet': 50,
                 'nameOfPersonMet': 150,
                 'easeOfLocation': 100,
+                'comments': None,
                 'receivedDate': None,
-                'metOthers': None,
                 'verificationStatus': None,
                 'addressMedia': None,
                 'reportUrl': None

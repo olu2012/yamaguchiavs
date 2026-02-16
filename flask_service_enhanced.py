@@ -602,8 +602,8 @@ def vendor_address_verification_submit():
                   - relationshipWithPersonMet
                   - nameOfPersonMet
                   - easeOfLocation
+                  - comments
                   - receivedDate
-                  - metOthers
                   - verificationStatus
                   - addressMedia
                   - reportUrl
@@ -632,12 +632,8 @@ def vendor_address_verification_submit():
                     type: string
                   comments:
                     type: string
-                  additionalComments:
-                    type: string
                   receivedDate:
                     type: string
-                  metOthers:
-                    type: boolean
                   verificationStatus:
                     type: integer
                     description: "1=PENDING, 2=SUCCESS, 3=FAILED, 4=RETURNED"
@@ -743,11 +739,9 @@ def vendor_address_verification_submit():
                 "nameOfPersonMet": response.get("nameOfPersonMet", ""),
                 "easeOfLocation": response.get("easeOfLocation", "Medium"),
                 "comments": response.get("comments", ""),
-                "additionalComments": response.get("additionalComments", ""),
-                "metOthers": response.get("metOthers", False),
                 "verificationStatus": response.get("verificationStatus", VerificationStatus.SUCCESS.value),
                 "reportUrl": response.get("reportUrl", ""),
-                "photos": []  # Convert addressMedia to photos format if needed
+                "photos": []
             }
 
             # Convert addressMedia to photos format
@@ -757,8 +751,6 @@ def vendor_address_verification_submit():
                     "fileName": media.get("fileName", "photo.jpg"),
                     "base64Content": media.get("contentBase64", ""),
                     "contentType": media.get("contentType", "image/jpeg"),
-                    "caption": media.get("caption", ""),
-                    "timestamp": media.get("takenAt", ""),
                     "latitude": media.get("latitude", ""),
                     "longitude": media.get("longitude", "")
                 })
