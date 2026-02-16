@@ -751,8 +751,8 @@ def vendor_address_verification_submit():
                     "fileName": media.get("fileName", "photo.jpg"),
                     "base64Content": media.get("contentBase64", ""),
                     "contentType": media.get("contentType", "image/jpeg"),
-                    "latitude": media.get("latitude", ""),
-                    "longitude": media.get("longitude", "")
+                    "latitude": float(media.get("latitude", 0) or 0),
+                    "longitude": float(media.get("longitude", 0) or 0)
                 })
 
             # Submit to AVS
@@ -1024,8 +1024,8 @@ def handle_order_delivered(data: Dict) -> Dict:
                         "fileName": f"pod_{idx + 1}.jpg",
                         "base64Content": base64_content,
                         "contentType": content_type,
-                        "latitude": "",
-                        "longitude": ""
+                        "latitude": 0.0,
+                        "longitude": 0.0
                     })
     except Exception as e:
         logger.error(f"Error processing POD photos: {e}")
@@ -1110,8 +1110,8 @@ def handle_order_failed(data: Dict) -> Dict:
                         "fileName": f"pod_{idx + 1}.jpg",
                         "base64Content": base64_content,
                         "contentType": content_type,
-                        "latitude": "",
-                        "longitude": ""
+                        "latitude": 0.0,
+                        "longitude": 0.0
                     })
     except Exception as e:
         logger.error(f"Error processing POD photos: {e}")

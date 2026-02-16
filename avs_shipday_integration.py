@@ -348,8 +348,8 @@ class AVSShipdayIntegration:
                     "contentBase64": photo.get('base64Content', ''),
                     "contentType": photo.get('contentType', 'image/jpeg'),
                     "mediaType": MediaType.IMAGE.value,
-                    "latitude": photo.get('latitude', ''),
-                    "longitude": photo.get('longitude', '')
+                    "latitude": float(photo.get('latitude', 0) or 0),
+                    "longitude": float(photo.get('longitude', 0) or 0)
                 })
 
         # Build response object with only the 16 required fields
@@ -369,7 +369,7 @@ class AVSShipdayIntegration:
             "receivedDate": datetime.utcnow().isoformat() + 'Z',
             "verificationStatus": verification_details.get('verificationStatus', VerificationStatus.SUCCESS.value),
             "addressMedia": address_media,
-            "reportUrl": verification_details.get('reportUrl', '')
+            "reportUrl": verification_details.get('reportUrl') or "https://avs-shipday-production.onrender.com"
         }
 
         return response
