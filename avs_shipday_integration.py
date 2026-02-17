@@ -352,6 +352,18 @@ class AVSShipdayIntegration:
                     "longitude": float(photo.get('longitude', 0) or 0)
                 })
 
+        # AVS requires at least one addressMedia item — add placeholder if none
+        if not address_media:
+            # Minimal 1x1 white JPEG as placeholder
+            address_media.append({
+                "fileName": "no_photo_available.jpg",
+                "contentBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAFBABAAAAAAAAAAAAAAAAAAAAf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+A/9k=",
+                "contentType": "image/jpeg",
+                "mediaType": MediaType.IMAGE.value,
+                "latitude": 0.0,
+                "longitude": 0.0
+            })
+
         # Build response object with only the 16 required fields
         response = {
             "activityId": activity_id,
