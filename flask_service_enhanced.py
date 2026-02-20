@@ -933,6 +933,7 @@ def shipday_webhook():
         "ORDER_COMPLETED": handle_order_completed,
         "ORDER_FAILED": handle_order_failed,
         "ORDER_INCOMPLETE": handle_order_incomplete,
+        "ORDER_DELETE": handle_order_delete,
         "ORDER_STATUS_CHANGED": handle_status_change,
     }
 
@@ -1318,6 +1319,96 @@ def handle_order_incomplete(data: Dict) -> Dict:
 
     # Submit to AVS
     logger.info(f"[Phase 2] Submitting incomplete result to AVS for activityId: {activity_id}")
+    avs_result = integration.submit_verification_result(
+        activity_id=activity_id,
+        shipday_order_data={},
+        verification_details=verification_details
+    )
+    logger.info(f"[Phase 2] AVS submission result: success={avs_result.get('success')}, status={avs_result.get('status_code')}")
+
+    return {
+        "order_id": order_id,
+        "order_number": order_number,
+        "status": order_status,
+        "delivery_name": delivery.get("name"),
+        "delivery_note": delivery_note,
+        "avs_submitted": avs_result.get("success", False),
+        "avs_status_code": avs_result.get("status_code")
+    }
+
+
+def handle_order_delete(data: Dict) -> Dict:
+    """Handle order deleted event - submit returned verification to AVS."""
+    order = data.get("order", {})
+    order_id = order.get("id")
+    order_number = order.get("order_number")
+    order_status = data.get("order_status")
+    delivery = data.get("delivery_details", {})
+    delivery_note = data.get("delivery_note", "")
+    timestamp = data.get("timestamp")
+    tracking_url = data.get("trackingUrl", "")
+    pods = data.get("pods", [])
+
+    logger.warning(f"Order {order_id} ({order_number}) DELETED - status: {order_status}, delivery to: {delivery.get('name')}, note: {delivery_note}")
+
+    # order_number IS the activityId
+    activity_id = order_number
+
+    if not activity_id:
+        logger.error(f"Order {order_id} has no order_number, cannot submit to AVS")
+        return {"order_id": order_id, "error": "No order_number/activityId"}
+
+    # Convert timestamp (epoch ms) to ISO format
+    visit_date = datetime.utcnow().isoformat() + 'Z'
+    if timestamp:
+        try:
+            visit_date = datetime.utcfromtimestamp(int(timestamp) / 1000).isoformat() + 'Z'
+        except (ValueError, TypeError, OSError):
+            pass
+
+    # Process any proof-of-delivery photos (unlikely for deleted orders)
+    photos = []
+    try:
+        integration = get_integration()
+        for idx, pod_url in enumerate(pods):
+            if isinstance(pod_url, str) and pod_url.startswith("http"):
+                base64_content, content_type = AVSShipdayIntegration.download_image_to_base64(pod_url)
+                if base64_content:
+                    photos.append({
+                        "fileName": f"pod_{idx + 1}.jpg",
+                        "base64Content": base64_content,
+                        "contentType": content_type,
+                        "latitude": 0.0,
+                        "longitude": 0.0
+                    })
+    except Exception as e:
+        logger.error(f"Error processing POD photos: {e}")
+        integration = get_integration()
+
+    # Build comments
+    delete_reason = delivery_note or order_status or "Order deleted"
+    comments = f"Verification returned - order deleted: {delete_reason}"
+
+    # Build verification details - deleted = returned verification
+    verification_details = {
+        "customerName": delivery.get("name", ""),
+        "address": delivery.get("address", ""),
+        "visitDate": visit_date,
+        "verificationStatus": VerificationStatus.RETURNED.value,
+        "comments": comments,
+        "reportUrl": tracking_url or "",
+        "addressExists": False,
+        "isResidentialAddress": False,
+        "isCustomerResidence": False,
+        "isCustomerKnown": False,
+        "relationshipWithPersonMet": "Not applicable",
+        "nameOfPersonMet": "Not applicable",
+        "easeOfLocation": "Hard",
+        "photos": photos
+    }
+
+    # Submit to AVS
+    logger.info(f"[Phase 2] Submitting deleted/returned result to AVS for activityId: {activity_id}")
     avs_result = integration.submit_verification_result(
         activity_id=activity_id,
         shipday_order_data={},
