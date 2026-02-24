@@ -928,6 +928,7 @@ def shipday_webhook():
 
     # Process different event types (Shipday uses uppercase event names)
     handlers = {
+        "ORDER_INSERTED": handle_order_inserted,
         "ORDER_ASSIGNED": handle_order_assigned,
         "ORDER_PICKED_UP": handle_order_picked_up,
         "ORDER_DELIVERED": handle_order_delivered,
@@ -949,6 +950,22 @@ def shipday_webhook():
     else:
         logger.warning(f"Unhandled webhook event: {event_type}")
         return jsonify({"success": True, "message": "Event acknowledged but not processed"})
+
+
+def handle_order_inserted(data: Dict) -> Dict:
+    """Handle order inserted event - cache order_id → order_number for future DELETE lookups."""
+    logger.info(f"ORDER_INSERTED raw payload: {json.dumps(data)}")
+    order = data.get("order", {})
+    order_id = order.get("id")
+    order_number = order.get("order_number")
+
+    if order_id and order_number:
+        order_cache.store(str(order_id), str(order_number))
+        logger.info(f"ORDER_INSERTED: cached {order_id} → {order_number}")
+    else:
+        logger.warning(f"ORDER_INSERTED: missing order_id={order_id} or order_number={order_number}, cannot cache")
+
+    return {"order_id": order_id, "order_number": order_number}
 
 
 def handle_status_change(data: Dict) -> Dict:
