@@ -1339,6 +1339,7 @@ def handle_order_incomplete(data: Dict) -> Dict:
 
 def handle_order_delete(data: Dict) -> Dict:
     """Handle order deleted event - submit returned verification to AVS."""
+    logger.info(f"ORDER_DELETE raw payload: {json.dumps(data)}")
     order = data.get("order", {})
     order_id = order.get("id")
     order_number = order.get("order_number")
