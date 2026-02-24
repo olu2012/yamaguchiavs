@@ -1340,24 +1340,42 @@ def handle_order_incomplete(data: Dict) -> Dict:
 def handle_order_delete(data: Dict) -> Dict:
     """Handle order deleted event - submit returned verification to AVS."""
     logger.info(f"ORDER_DELETE raw payload: {json.dumps(data)}")
-    order = data.get("order", {})
-    order_id = order.get("id")
-    order_number = order.get("order_number")
+
+    # ORDER_DELETE payload differs from other events: order_id is top-level,
+    # there is no nested "order" object, and no delivery_details.
+    order_id = data.get("order_id")
     order_status = data.get("order_status")
-    delivery = data.get("delivery_details", {})
     delivery_note = data.get("delivery_note", "")
     timestamp = data.get("timestamp")
-    tracking_url = data.get("trackingUrl", "")
     pods = data.get("pods", [])
 
-    logger.warning(f"Order {order_id} ({order_number}) DELETED - status: {order_status}, delivery to: {delivery.get('name')}, note: {delivery_note}")
+    logger.warning(f"Order {order_id} DELETED - status: {order_status}, note: {delivery_note}")
+
+    # ORDER_DELETE does not include order_number (activityId). Attempt to
+    # retrieve it from Shipday API before the record disappears.
+    order_number = None
+    delivery = {}
+    tracking_url = ""
+    try:
+        integration = get_integration()
+        order_data = integration.get_shipday_order(order_id)
+        if order_data:
+            order_number = order_data.get("orderNumber")
+            delivery = order_data.get("deliveryDetails", {})
+            tracking_url = order_data.get("trackingUrl", "")
+            logger.info(f"Fetched order {order_id} from Shipday API: order_number={order_number}, delivery_to={delivery.get('name')}")
+        else:
+            logger.warning(f"Order {order_id} not found in Shipday API (already purged)")
+    except Exception as e:
+        logger.error(f"Error fetching order {order_id} from Shipday API: {e}")
+        integration = get_integration()
 
     # order_number IS the activityId
     activity_id = order_number
 
     if not activity_id:
-        logger.error(f"Order {order_id} has no order_number, cannot submit to AVS")
-        return {"order_id": order_id, "error": "No order_number/activityId"}
+        logger.error(f"Order {order_id} has no order_number (not in payload or API), cannot submit to AVS")
+        return {"order_id": order_id, "error": "No order_number/activityId - order may be purged before webhook processed"}
 
     # Convert timestamp (epoch ms) to ISO format
     visit_date = datetime.utcnow().isoformat() + 'Z'
@@ -1370,7 +1388,6 @@ def handle_order_delete(data: Dict) -> Dict:
     # Process any proof-of-delivery photos (unlikely for deleted orders)
     photos = []
     try:
-        integration = get_integration()
         for idx, pod_url in enumerate(pods):
             if isinstance(pod_url, str) and pod_url.startswith("http"):
                 base64_content, content_type = AVSShipdayIntegration.download_image_to_base64(pod_url)
@@ -1384,7 +1401,6 @@ def handle_order_delete(data: Dict) -> Dict:
                     })
     except Exception as e:
         logger.error(f"Error processing POD photos: {e}")
-        integration = get_integration()
 
     # Build comments
     delete_reason = delivery_note or order_status or "Order deleted"
