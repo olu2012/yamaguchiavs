@@ -9,6 +9,7 @@ import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 from enum import Enum
+import order_cache
 
 
 class VerificationStatus(Enum):
@@ -231,6 +232,10 @@ class AVSShipdayIntegration:
                     result = response.json()
                     # Check if Shipday reported success
                     if result.get('success') == True:
+                        # Cache order_id → activityId so ORDER_DELETE can look it up later
+                        shipday_order_id = result.get('orderId')
+                        if shipday_order_id and activity_id:
+                            order_cache.store(str(shipday_order_id), activity_id)
                         return result
                     else:
                         print(f"[Shipday] API returned success=false: {result}")

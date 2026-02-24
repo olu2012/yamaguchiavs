@@ -16,6 +16,7 @@ from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 from flasgger import Swagger
 
+import order_cache
 from avs_shipday_integration import (
     AVSShipdayIntegration,
     VerificationStatus,
@@ -1351,24 +1352,32 @@ def handle_order_delete(data: Dict) -> Dict:
 
     logger.warning(f"Order {order_id} DELETED - status: {order_status}, note: {delivery_note}")
 
-    # ORDER_DELETE does not include order_number (activityId). Attempt to
-    # retrieve it from Shipday API before the record disappears.
+    # ORDER_DELETE does not include order_number (activityId).
+    # 1. Check local persistent cache (order_cache.py / SQLite on /data)
+    # 2. Fall back to Shipday API (may already be purged)
     order_number = None
     delivery = {}
     tracking_url = ""
-    try:
-        integration = get_integration()
-        order_data = integration.get_shipday_order(order_id)
-        if order_data:
-            order_number = order_data.get("orderNumber")
-            delivery = order_data.get("deliveryDetails", {})
-            tracking_url = order_data.get("trackingUrl", "")
-            logger.info(f"Fetched order {order_id} from Shipday API: order_number={order_number}, delivery_to={delivery.get('name')}")
-        else:
-            logger.warning(f"Order {order_id} not found in Shipday API (already purged)")
-    except Exception as e:
-        logger.error(f"Error fetching order {order_id} from Shipday API: {e}")
-        integration = get_integration()
+    integration = get_integration()
+
+    # --- cache lookup ---
+    cached_activity_id = order_cache.lookup(str(order_id))
+    if cached_activity_id:
+        order_number = cached_activity_id
+        logger.info(f"Order {order_id}: resolved activityId={order_number} from local cache")
+    else:
+        # --- Shipday API fallback ---
+        try:
+            order_data = integration.get_shipday_order(order_id)
+            if order_data:
+                order_number = order_data.get("orderNumber")
+                delivery = order_data.get("deliveryDetails", {})
+                tracking_url = order_data.get("trackingUrl", "")
+                logger.info(f"Order {order_id}: resolved activityId={order_number} from Shipday API")
+            else:
+                logger.warning(f"Order {order_id} not found in Shipday API (already purged) and not in cache")
+        except Exception as e:
+            logger.error(f"Error fetching order {order_id} from Shipday API: {e}")
 
     # order_number IS the activityId
     activity_id = order_number
