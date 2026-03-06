@@ -564,9 +564,11 @@ def validate_avs_payload():
 @app.route("/vendor/address-verification/submit", methods=["POST"])
 @require_api_key
 def vendor_address_verification_submit():
-    """Submit address verification response (Legacy endpoint).
+    """Submit address verification request or response.
 
-    This endpoint receives completed verification results and submits them to AVS.
+    Accepts two payload formats:
+    1. New AVS format (has customer_reference) - creates a Shipday delivery order.
+    2. Legacy format (has vendorId) - submits completed verification results to AVS.
     ---
     tags:
       - AVS Integration
@@ -579,16 +581,69 @@ def vendor_address_verification_submit():
         required: true
         schema:
           type: object
-          required:
-            - vendorId
-            - addressVerificationResponses
           properties:
+            customer_reference:
+              type: string
+              description: "New AVS format: unique reference for this verification request"
+              example: "CUST-20260202-001"
+            verification_type:
+              type: string
+              description: "New AVS format: type of verification"
+              example: "AddressVerification"
+            subject_first_name:
+              type: string
+              example: "Test1"
+            subject_middle_name:
+              type: string
+              example: "Tester3"
+            subject_last_name:
+              type: string
+              example: "Tester"
+            subject_email:
+              type: string
+              example: "test@example.com"
+            subject_phone:
+              type: string
+              example: "+2348012345678"
+            subject_date_of_birth:
+              type: string
+              example: "1992-07-15"
+            address_street:
+              type: string
+              example: "No. 12 Peace Avenue"
+            address_city:
+              type: string
+              example: "Ikeja"
+            address_state:
+              type: string
+              example: "Lagos"
+            address_lga:
+              type: string
+              example: "Ikeja"
+            address_landmark:
+              type: string
+              example: "Near Ikeja City Mall"
+            address_postal_code:
+              type: string
+              example: "100271"
+            address_country:
+              type: string
+              example: "Nigeria"
+            fullAddress:
+              type: string
+              description: "New AVS format: pre-formatted complete address string. When provided, takes precedence over the individual address_* fields."
+              example: "45 Aminu Kano Crescent, Wuse II, Abuja, FCT 900288, Nigeria"
+            additionalInformation:
+              type: string
+              description: "New AVS format: extra notes or landmarks to assist the field agent (e.g. house colour, gate description)."
+              example: "House with Green Color"
             vendorId:
               type: string
-              description: Vendor ID (GUID)
+              description: "Legacy format: Vendor ID (GUID)"
               example: "9773FC2D-8DC2-40E6-B272-71AC04719FBD"
             addressVerificationResponses:
               type: array
+              description: "Legacy format: completed verification results"
               items:
                 type: object
                 required:

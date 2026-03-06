@@ -147,24 +147,25 @@ class AVSShipdayIntegration:
         name_parts = [first_name, middle_name, last_name]
         customer_name = ' '.join(part for part in name_parts if part).strip()
 
-        # Build full address from address fields
-        address_parts = []
-        if avs_data.get('address_street'):
-            address_parts.append(avs_data['address_street'])
-        if avs_data.get('address_landmark'):
-            address_parts.append(avs_data['address_landmark'])
-        if avs_data.get('address_lga'):
-            address_parts.append(avs_data['address_lga'])
-        if avs_data.get('address_city'):
-            address_parts.append(avs_data['address_city'])
-        if avs_data.get('address_state'):
-            address_parts.append(avs_data['address_state'])
-        if avs_data.get('address_postal_code'):
-            address_parts.append(avs_data['address_postal_code'])
-        if avs_data.get('address_country'):
-            address_parts.append(avs_data['address_country'])
-
-        full_address = ', '.join(address_parts) if address_parts else 'Address not provided'
+        # Build full address — use fullAddress directly if provided, else build from parts
+        full_address = avs_data.get('fullAddress', '').strip()
+        if not full_address:
+            address_parts = []
+            if avs_data.get('address_street'):
+                address_parts.append(avs_data['address_street'])
+            if avs_data.get('address_landmark'):
+                address_parts.append(avs_data['address_landmark'])
+            if avs_data.get('address_lga'):
+                address_parts.append(avs_data['address_lga'])
+            if avs_data.get('address_city'):
+                address_parts.append(avs_data['address_city'])
+            if avs_data.get('address_state'):
+                address_parts.append(avs_data['address_state'])
+            if avs_data.get('address_postal_code'):
+                address_parts.append(avs_data['address_postal_code'])
+            if avs_data.get('address_country'):
+                address_parts.append(avs_data['address_country'])
+            full_address = ', '.join(address_parts) if address_parts else 'Address not provided'
 
         # Get phone number
         phone = avs_data.get('subject_phone', '08000000000')
@@ -176,6 +177,7 @@ class AVSShipdayIntegration:
             'customerPhoneNumber': phone,
             'visitDate': datetime.utcnow().isoformat() + 'Z',
             'additionalComments': avs_data.get('verification_type', 'AddressVerification'),
+            'additionalInformation': avs_data.get('additionalInformation', ''),
             # Preserve original data for reference
             'originalPayload': avs_data
         }
@@ -196,6 +198,7 @@ class AVSShipdayIntegration:
             address = verification_request.get('address', '')
             activity_id = verification_request.get('activityId', '')
             phone = verification_request.get('customerPhoneNumber', '08000000000')
+            additional_info = verification_request.get('additionalInformation', '')
 
             # Prepare Shipday order payload - minimal required fields
             shipday_payload = {
@@ -207,6 +210,10 @@ class AVSShipdayIntegration:
                 "restaurantAddress": "Victoria Island, Lagos, Nigeria",
                 "restaurantPhoneNumber": "08000000000"
             }
+
+            # Include additional information as order notes if provided
+            if additional_info:
+                shipday_payload["orderDetails"] = additional_info
 
             # Make API call to Shipday
             headers = {
