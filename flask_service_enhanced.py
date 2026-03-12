@@ -1062,6 +1062,34 @@ def handle_order_picked_up(data: Dict) -> Dict:
     return {"order_id": order_id, "order_number": order_number, "pickup_time": timestamp}
 
 
+def _extract_pod_photos_from_shipday_order(order_data, label="Phase 2"):
+    """Extract and download POD photos from a Shipday API order response.
+    Shipday returns photos in proofOfDelivery.imageUrls (and optionally signaturePath)."""
+    photos = []
+    proof = order_data.get("proofOfDelivery") or {}
+    image_urls = proof.get("imageUrls") or []
+    signature_url = proof.get("signaturePath")
+
+    all_urls = list(image_urls)
+    if signature_url and isinstance(signature_url, str) and signature_url.startswith("http"):
+        all_urls.append(signature_url)
+
+    logger.info(f"[{label}] Found {len(image_urls)} POD image(s) + {'1 signature' if signature_url else 'no signature'}")
+    for idx, url in enumerate(all_urls):
+        if isinstance(url, str) and url.startswith("http"):
+            base64_content, content_type = AVSShipdayIntegration.download_image_to_base64(url)
+            if base64_content:
+                fname = "signature.jpg" if idx >= len(image_urls) else f"pod_{idx + 1}.jpg"
+                photos.append({
+                    "fileName": fname,
+                    "base64Content": base64_content,
+                    "contentType": content_type,
+                    "latitude": float(proof.get("latitude") or 0),
+                    "longitude": float(proof.get("longitude") or 0)
+                })
+    return photos
+
+
 def _process_and_submit_to_avs(order_id, activity_id, delivery, visit_date,
                                 tracking_url, comments, verification_status,
                                 delay_seconds=0):
@@ -1074,29 +1102,15 @@ def _process_and_submit_to_avs(order_id, activity_id, delivery, visit_date,
     try:
         integration = get_integration()
 
-        # Fetch fresh order data from Shipday API to get POD photos
+        # Fetch fresh order data using order_number (UUID = activity_id) — Shipday returns
+        # 404 for numeric IDs on completed orders, but UUID order numbers work fine.
         photos = []
-        fresh_order = integration.get_shipday_order(str(order_id))
-        if fresh_order:
-            # Shipday API may return podUrls at top level or inside order object
-            pod_urls = (
-                fresh_order.get("podUrls") or
-                fresh_order.get("pods") or
-                fresh_order.get("order", {}).get("podUrls") or
-                []
-            )
-            logger.info(f"[Phase 2] Fetched order {order_id} from Shipday API — {len(pod_urls)} POD photo(s) found")
-            for idx, pod_url in enumerate(pod_urls):
-                if isinstance(pod_url, str) and pod_url.startswith("http"):
-                    base64_content, content_type = AVSShipdayIntegration.download_image_to_base64(pod_url)
-                    if base64_content:
-                        photos.append({
-                            "fileName": f"pod_{idx + 1}.jpg",
-                            "base64Content": base64_content,
-                            "contentType": content_type,
-                            "latitude": 0.0,
-                            "longitude": 0.0
-                        })
+        raw = integration.get_shipday_order(str(activity_id))
+        if raw:
+            # Shipday returns a list when queried by order number
+            fresh_order = raw[0] if isinstance(raw, list) and raw else raw
+            photos = _extract_pod_photos_from_shipday_order(fresh_order)
+            logger.info(f"[Phase 2] Fetched order {order_id} from Shipday API — {len(photos)} photo(s) downloaded")
         else:
             logger.warning(f"[Phase 2] Could not fetch order {order_id} from Shipday API — proceeding without photos")
 
@@ -1711,48 +1725,23 @@ def refire_orders():
             continue
 
         try:
-            # Fetch fresh order data from Shipday
-            fresh_order = integration.get_shipday_order(str(order_id))
-            if not fresh_order:
+            # Fetch using order_number UUID (= activity_id) — numeric IDs return 404 for completed orders
+            raw = integration.get_shipday_order(str(activity_id))
+            if not raw:
                 results.append({"order_id": order_id, "activity_id": activity_id, "error": "Could not fetch order from Shipday"})
                 continue
 
-            pod_urls = (
-                fresh_order.get("podUrls") or
-                fresh_order.get("pods") or
-                fresh_order.get("order", {}).get("podUrls") or
-                []
-            )
-            logger.info(f"[Refire] Order {order_id} — {len(pod_urls)} POD photo(s) found")
+            # Shipday returns a list when queried by order number
+            fresh_order = raw[0] if isinstance(raw, list) and raw else raw
 
-            photos = []
-            for idx, pod_url in enumerate(pod_urls):
-                if isinstance(pod_url, str) and pod_url.startswith("http"):
-                    base64_content, content_type = AVSShipdayIntegration.download_image_to_base64(pod_url)
-                    if base64_content:
-                        photos.append({
-                            "fileName": f"pod_{idx + 1}.jpg",
-                            "base64Content": base64_content,
-                            "contentType": content_type,
-                            "latitude": 0.0,
-                            "longitude": 0.0
-                        })
+            photos = _extract_pod_photos_from_shipday_order(fresh_order, label="Refire")
+            logger.info(f"[Refire] Order {order_id} — {len(photos)} photo(s) downloaded")
 
-            # Extract delivery details from fresh order
-            delivery = fresh_order.get("delivery_details") or fresh_order.get("deliveryDetails") or {}
-            customer_name = (
-                delivery.get("name") or
-                fresh_order.get("customerName") or
-                fresh_order.get("customer_name") or
-                ""
-            )
-            address = (
-                delivery.get("address") or
-                fresh_order.get("customerAddress") or
-                fresh_order.get("customer_address") or
-                ""
-            )
-            tracking_url = fresh_order.get("trackingUrl") or fresh_order.get("tracking_url") or ""
+            # Extract customer/delivery details from Shipday API response structure
+            customer = fresh_order.get("customer") or {}
+            customer_name = customer.get("name") or ""
+            address = customer.get("address") or ""
+            tracking_url = fresh_order.get("trackingLink") or fresh_order.get("trackingUrl") or ""
 
             verification_details = {
                 "customerName": customer_name,
