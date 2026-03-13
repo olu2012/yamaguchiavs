@@ -1706,6 +1706,7 @@ def refire_orders():
     """
     data = request.get_json() or {}
     orders = data.get("orders", [])
+    dry_run = data.get("dry_run", False)
 
     if not orders:
         return jsonify({"error": "No orders provided"}), 400
@@ -1759,6 +1760,22 @@ def refire_orders():
                 "easeOfLocation": "Medium",
                 "photos": photos
             }
+
+            if dry_run:
+                # Build the payload but do not submit — return it in full
+                avs_response = integration._build_avs_response(activity_id, {}, verification_details)
+                avs_payload = {
+                    "vendorId": integration.avs_vendor_id,
+                    "addressVerificationResponses": [avs_response]
+                }
+                results.append({
+                    "order_id": order_id,
+                    "activity_id": activity_id,
+                    "pod_count": len(photos),
+                    "dry_run": True,
+                    "avs_payload": avs_payload
+                })
+                continue
 
             logger.info(f"[Refire] Submitting to AVS for activityId: {activity_id} with {len(photos)} photo(s)")
             avs_result = integration.submit_verification_result(
