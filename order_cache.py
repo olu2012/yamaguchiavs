@@ -38,6 +38,19 @@ def store(shipday_order_id: str, activity_id: str) -> None:
         logger.error(f"[order_cache] Failed to store mapping: {e}")
 
 
+def dump_all() -> list:
+    """Return all (shipday_order_id, activity_id) pairs in the cache."""
+    try:
+        with _get_conn() as conn:
+            rows = conn.execute(
+                "SELECT shipday_order_id, activity_id FROM order_map ORDER BY created_at"
+            ).fetchall()
+        return [{"shipday_order_id": r[0], "activity_id": r[1]} for r in rows]
+    except Exception as e:
+        logger.error(f"[order_cache] Failed to dump all: {e}")
+        return []
+
+
 def lookup(shipday_order_id: str) -> str | None:
     """Return activity_id for the given shipday_order_id, or None if not found."""
     try:

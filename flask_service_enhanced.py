@@ -1801,6 +1801,98 @@ def refire_orders():
     return jsonify({"results": results, "total": len(results)})
 
 
+@app.route("/api/v1/admin/refire-all", methods=["POST"])
+@require_api_key
+def refire_all():
+    """Refire all orders stored in the order cache."""
+    data = request.get_json() or {}
+    dry_run = data.get("dry_run", False)
+
+    all_entries = order_cache.dump_all()
+    if not all_entries:
+        return jsonify({"error": "No orders found in cache"}), 404
+
+    try:
+        integration = get_integration()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    results = []
+    for entry in all_entries:
+        order_id = entry["shipday_order_id"]
+        activity_id = entry["activity_id"]
+
+        try:
+            raw = integration.get_shipday_order(str(activity_id))
+            if not raw:
+                results.append({"order_id": order_id, "activity_id": activity_id, "error": "Could not fetch order from Shipday"})
+                continue
+
+            fresh_order = raw[0] if isinstance(raw, list) and raw else raw
+            photos = _extract_pod_photos_from_shipday_order(fresh_order, label="RefireAll")
+            logger.info(f"[RefireAll] Order {order_id} — {len(photos)} photo(s) downloaded")
+
+            customer = fresh_order.get("customer") or {}
+            customer_name = customer.get("name") or ""
+            address = customer.get("address") or ""
+            tracking_url = fresh_order.get("trackingLink") or fresh_order.get("trackingUrl") or ""
+
+            verification_details = {
+                "customerName": customer_name,
+                "address": address,
+                "visitDate": datetime.utcnow().isoformat() + 'Z',
+                "verificationStatus": VerificationStatus.SUCCESS.value,
+                "comments": "Verification completed - refire with POD photos",
+                "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
+                "addressExists": True,
+                "isResidentialAddress": True,
+                "isCustomerResidence": True,
+                "isCustomerKnown": True,
+                "relationshipWithPersonMet": "Self",
+                "nameOfPersonMet": customer_name or "Not specified",
+                "easeOfLocation": "Medium",
+                "photos": photos
+            }
+
+            if dry_run:
+                avs_response = integration._build_avs_response(activity_id, {}, verification_details)
+                avs_payload = {
+                    "vendorId": integration.avs_vendor_id,
+                    "addressVerificationResponses": [avs_response]
+                }
+                results.append({
+                    "order_id": order_id,
+                    "activity_id": activity_id,
+                    "pod_count": len(photos),
+                    "dry_run": True,
+                    "avs_payload": avs_payload
+                })
+                continue
+
+            logger.info(f"[RefireAll] Submitting to AVS for activityId: {activity_id} with {len(photos)} photo(s)")
+            avs_result = integration.submit_verification_result(
+                activity_id=activity_id,
+                shipday_order_data={},
+                verification_details=verification_details
+            )
+            logger.info(f"[RefireAll] AVS result: success={avs_result.get('success')}, status={avs_result.get('status_code')}")
+
+            results.append({
+                "order_id": order_id,
+                "activity_id": activity_id,
+                "pod_count": len(photos),
+                "avs_success": avs_result.get("success"),
+                "avs_status_code": avs_result.get("status_code"),
+                "avs_response": avs_result.get("response")
+            })
+
+        except Exception as e:
+            logger.error(f"[RefireAll] Error for order {order_id}: {e}")
+            results.append({"order_id": order_id, "activity_id": activity_id, "error": str(e)})
+
+    return jsonify({"results": results, "total": len(results)})
+
+
 @app.route("/api/v1/media-types", methods=["GET"])
 def get_media_types():
     """Get list of valid media types.
