@@ -1791,7 +1791,7 @@ def refire_orders():
                 "pod_count": len(photos),
                 "avs_success": avs_result.get("success"),
                 "avs_status_code": avs_result.get("status_code"),
-                "avs_response": avs_result.get("response")
+                "avs_response": avs_result.get("response") or avs_result.get("error")
             })
 
         except Exception as e:
@@ -1883,7 +1883,7 @@ def refire_all():
                 "pod_count": len(photos),
                 "avs_success": avs_result.get("success"),
                 "avs_status_code": avs_result.get("status_code"),
-                "avs_response": avs_result.get("response")
+                "avs_response": avs_result.get("response") or avs_result.get("error")
             })
 
         except Exception as e:
