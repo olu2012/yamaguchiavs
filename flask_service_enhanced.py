@@ -1891,22 +1891,41 @@ def refire_all():
             address = customer.get("address") or ""
             tracking_url = fresh_order.get("trackingLink") or fresh_order.get("trackingUrl") or ""
 
-            verification_details = {
-                "customerName": customer_name,
-                "address": address,
-                "visitDate": datetime.utcnow().isoformat() + 'Z',
-                "verificationStatus": VerificationStatus.SUCCESS.value,
-                "comments": "Verification completed - refire with POD photos",
-                "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
-                "addressExists": True,
-                "isResidentialAddress": True,
-                "isCustomerResidence": True,
-                "isCustomerKnown": True,
-                "relationshipWithPersonMet": "Self",
-                "nameOfPersonMet": customer_name or "Not specified",
-                "easeOfLocation": "Medium",
-                "photos": photos
-            }
+            # Orders with no POD photos are still pending in Shipday — submit as RETURNED
+            if photos:
+                verification_details = {
+                    "customerName": customer_name,
+                    "address": address,
+                    "visitDate": datetime.utcnow().isoformat() + 'Z',
+                    "verificationStatus": VerificationStatus.SUCCESS.value,
+                    "comments": "Verification completed - refire with POD photos",
+                    "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
+                    "addressExists": True,
+                    "isResidentialAddress": True,
+                    "isCustomerResidence": True,
+                    "isCustomerKnown": True,
+                    "relationshipWithPersonMet": "Self",
+                    "nameOfPersonMet": customer_name or "Not specified",
+                    "easeOfLocation": "Medium",
+                    "photos": photos
+                }
+            else:
+                verification_details = {
+                    "customerName": customer_name,
+                    "address": address,
+                    "visitDate": datetime.utcnow().isoformat() + 'Z',
+                    "verificationStatus": VerificationStatus.RETURNED.value,
+                    "comments": "Verification returned - order still pending in Shipday",
+                    "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
+                    "addressExists": False,
+                    "isResidentialAddress": False,
+                    "isCustomerResidence": False,
+                    "isCustomerKnown": False,
+                    "relationshipWithPersonMet": "Not applicable",
+                    "nameOfPersonMet": "Not applicable",
+                    "easeOfLocation": "Hard",
+                    "photos": []
+                }
 
             if dry_run:
                 avs_response = integration._build_avs_response(activity_id, {}, verification_details)
