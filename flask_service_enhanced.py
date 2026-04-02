@@ -1031,8 +1031,62 @@ def handle_status_change(data: Dict) -> Dict:
     order_id = order.get("id")
     order_number = order.get("order_number")
     order_status = data.get("order_status")
+    delivery = data.get("delivery_details", {})
+    tracking_url = data.get("trackingUrl", "")
+    timestamp = data.get("timestamp")
 
     logger.info(f"Order {order_id} ({order_number}) status changed to: {order_status}")
+
+    # When Shipday sets status back to "Pending", treat as returned to AVS
+    if order_status and order_status.lower() == "pending":
+        activity_id = order_number
+        if not activity_id:
+            logger.error(f"Order {order_id} has no order_number, cannot submit RETURNED to AVS")
+            return {"order_id": order_id, "order_number": order_number, "status": order_status}
+
+        visit_date = datetime.utcnow().isoformat() + 'Z'
+        if timestamp:
+            try:
+                visit_date = datetime.utcfromtimestamp(int(timestamp) / 1000).isoformat() + 'Z'
+            except (ValueError, TypeError, OSError):
+                pass
+
+        verification_details = {
+            "customerName": delivery.get("name", ""),
+            "address": delivery.get("address", ""),
+            "visitDate": visit_date,
+            "verificationStatus": VerificationStatus.RETURNED.value,
+            "comments": f"Verification returned - order status set to Pending",
+            "reportUrl": tracking_url or "",
+            "addressExists": False,
+            "isResidentialAddress": False,
+            "isCustomerResidence": False,
+            "isCustomerKnown": False,
+            "relationshipWithPersonMet": "Not applicable",
+            "nameOfPersonMet": "Not applicable",
+            "easeOfLocation": "Hard",
+            "photos": []
+        }
+
+        logger.info(f"[Phase 2] Submitting RETURNED result to AVS for activityId: {activity_id} (status changed to Pending)")
+        try:
+            integration = get_integration()
+            avs_result = integration.submit_verification_result(
+                activity_id=activity_id,
+                shipday_order_data={},
+                verification_details=verification_details
+            )
+            logger.info(f"[Phase 2] AVS submission result: success={avs_result.get('success')}, status={avs_result.get('status_code')}")
+            return {
+                "order_id": order_id,
+                "order_number": order_number,
+                "status": order_status,
+                "avs_submitted": avs_result.get("success", False),
+                "avs_status_code": avs_result.get("status_code")
+            }
+        except Exception as e:
+            logger.error(f"[Phase 2] Error submitting RETURNED to AVS for order {order_id}: {e}")
+            return {"order_id": order_id, "order_number": order_number, "status": order_status, "avs_error": str(e)}
 
     return {"order_id": order_id, "order_number": order_number, "status": order_status}
 
