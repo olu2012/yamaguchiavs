@@ -366,11 +366,11 @@ class AVSShipdayIntegration:
 
         # AVS requires at least one addressMedia item — add placeholder if none
         if not address_media:
-            # Minimal 1x1 white JPEG as placeholder
+            # 10x10 white PNG as placeholder (AVS rejects 1x1 JPEG as "Invalid media data")
             address_media.append({
-                "fileName": "no_photo_available.jpg",
-                "contentBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAFBABAAAAAAAAAAAAAAAAAAAAf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+A/9k=",
-                "contentType": "image/jpeg",
+                "fileName": "no_photo_available.png",
+                "contentBase64": "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEElEQVR4nGP4jxcwjEpjAwD6Hirkl4HYkQAAAABJRU5ErkJggg==",
+                "contentType": "image/png",
                 "mediaType": MediaType.IMAGE.value,
                 "latitude": 0.0,
                 "longitude": 0.0
