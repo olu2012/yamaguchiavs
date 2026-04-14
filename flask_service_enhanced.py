@@ -246,6 +246,7 @@ def root():
             "avs_webhook": "/api/v1/avs/webhook",
             "submit_verification": "/api/v1/avs/submit-verification",
             "vendor_submit": "/vendor/address-verification/submit",
+            "check_status": "/vendor/address-verification/status/<reference>",
             "get_order": "/api/v1/orders/<order_id>",
             "list_orders": "/api/v1/orders",
             "shipday_webhook": "/webhooks/shipday"
@@ -840,6 +841,75 @@ def vendor_address_verification_submit():
             "status_code": 500,
             "message": str(e)
         }), 500
+
+
+# ==================== REFERENCE STATUS ENDPOINT ====================
+
+@app.route("/vendor/address-verification/status/<reference>", methods=["GET"])
+@require_api_key
+def check_verification_status(reference: str):
+    """Check whether an address verification request was received for a given reference.
+    ---
+    tags:
+      - AVS Integration
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: reference
+        type: string
+        required: true
+        description: The customer_reference (unique reference number) sent by AVS
+        example: "CUST-20260202-001"
+    responses:
+      200:
+        description: Verification request found
+        schema:
+          type: object
+          properties:
+            found:
+              type: boolean
+              example: true
+            reference:
+              type: string
+              example: "CUST-20260202-001"
+            shipday_order_id:
+              type: string
+              example: "98765"
+            message:
+              type: string
+              example: "Verification request received and dispatched"
+      404:
+        description: No verification request found for this reference
+        schema:
+          type: object
+          properties:
+            found:
+              type: boolean
+              example: false
+            reference:
+              type: string
+            message:
+              type: string
+      401:
+        description: Unauthorized
+    """
+    shipday_order_id = order_cache.lookup_by_activity_id(reference)
+
+    if shipday_order_id is None:
+        return jsonify({
+            "found": False,
+            "reference": reference,
+            "message": "No verification request found for this reference"
+        }), 404
+
+    return jsonify({
+        "found": True,
+        "reference": reference,
+        "shipday_order_id": shipday_order_id,
+        "message": "Verification request received and dispatched"
+    }), 200
 
 
 # ==================== ORDER MANAGEMENT ENDPOINTS ====================

@@ -51,6 +51,24 @@ def dump_all() -> list:
         return []
 
 
+def lookup_by_activity_id(activity_id: str) -> str | None:
+    """Return shipday_order_id for the given activity_id (customer_reference), or None if not found."""
+    try:
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT shipday_order_id FROM order_map WHERE activity_id = ? ORDER BY created_at DESC LIMIT 1",
+                (str(activity_id),),
+            ).fetchone()
+        if row:
+            logger.info(f"[order_cache] Found activity_id={activity_id} → {row[0]}")
+            return row[0]
+        logger.warning(f"[order_cache] No mapping for activity_id={activity_id}")
+        return None
+    except Exception as e:
+        logger.error(f"[order_cache] Failed to lookup by activity_id: {e}")
+        return None
+
+
 def lookup(shipday_order_id: str) -> str | None:
     """Return activity_id for the given shipday_order_id, or None if not found."""
     try:
