@@ -106,9 +106,8 @@ def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not API_KEY:
-            # API key not configured - reject all requests
-            logger.error("API_KEY environment variable is not set. All authenticated requests will be rejected.")
-            return jsonify({"error": "Service Misconfigured", "message": "API authentication is not configured"}), 503
+            # API key not configured - open access (dev mode)
+            return f(*args, **kwargs)
 
         auth_header = request.headers.get("Authorization", "")
         api_key_header = request.headers.get("X-API-Key", "")
