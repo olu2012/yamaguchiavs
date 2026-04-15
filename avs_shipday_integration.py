@@ -9,6 +9,7 @@ import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 from enum import Enum
+import order_cache
 
 
 class VerificationStatus(Enum):
@@ -146,24 +147,25 @@ class AVSShipdayIntegration:
         name_parts = [first_name, middle_name, last_name]
         customer_name = ' '.join(part for part in name_parts if part).strip()
 
-        # Build full address from address fields
-        address_parts = []
-        if avs_data.get('address_street'):
-            address_parts.append(avs_data['address_street'])
-        if avs_data.get('address_landmark'):
-            address_parts.append(avs_data['address_landmark'])
-        if avs_data.get('address_lga'):
-            address_parts.append(avs_data['address_lga'])
-        if avs_data.get('address_city'):
-            address_parts.append(avs_data['address_city'])
-        if avs_data.get('address_state'):
-            address_parts.append(avs_data['address_state'])
-        if avs_data.get('address_postal_code'):
-            address_parts.append(avs_data['address_postal_code'])
-        if avs_data.get('address_country'):
-            address_parts.append(avs_data['address_country'])
-
-        full_address = ', '.join(address_parts) if address_parts else 'Address not provided'
+        # Build full address — use fullAddress directly if provided, else build from parts
+        full_address = avs_data.get('fullAddress', '').strip()
+        if not full_address:
+            address_parts = []
+            if avs_data.get('address_street'):
+                address_parts.append(avs_data['address_street'])
+            if avs_data.get('address_landmark'):
+                address_parts.append(avs_data['address_landmark'])
+            if avs_data.get('address_lga'):
+                address_parts.append(avs_data['address_lga'])
+            if avs_data.get('address_city'):
+                address_parts.append(avs_data['address_city'])
+            if avs_data.get('address_state'):
+                address_parts.append(avs_data['address_state'])
+            if avs_data.get('address_postal_code'):
+                address_parts.append(avs_data['address_postal_code'])
+            if avs_data.get('address_country'):
+                address_parts.append(avs_data['address_country'])
+            full_address = ', '.join(address_parts) if address_parts else 'Address not provided'
 
         # Get phone number
         phone = avs_data.get('subject_phone', '08000000000')
@@ -175,6 +177,7 @@ class AVSShipdayIntegration:
             'customerPhoneNumber': phone,
             'visitDate': datetime.utcnow().isoformat() + 'Z',
             'additionalComments': avs_data.get('verification_type', 'AddressVerification'),
+            'additionalInformation': avs_data.get('additionalInformation', ''),
             # Preserve original data for reference
             'originalPayload': avs_data
         }
@@ -195,6 +198,7 @@ class AVSShipdayIntegration:
             address = verification_request.get('address', '')
             activity_id = verification_request.get('activityId', '')
             phone = verification_request.get('customerPhoneNumber', '08000000000')
+            additional_info = verification_request.get('additionalInformation', '')
 
             # Prepare Shipday order payload - minimal required fields
             shipday_payload = {
@@ -206,6 +210,10 @@ class AVSShipdayIntegration:
                 "restaurantAddress": "Victoria Island, Lagos, Nigeria",
                 "restaurantPhoneNumber": "08000000000"
             }
+
+            # Include additional information as order notes if provided
+            if additional_info:
+                shipday_payload["orderDetails"] = additional_info
 
             # Make API call to Shipday
             headers = {
@@ -231,6 +239,10 @@ class AVSShipdayIntegration:
                     result = response.json()
                     # Check if Shipday reported success
                     if result.get('success') == True:
+                        # Cache order_id → activityId so ORDER_DELETE can look it up later
+                        shipday_order_id = result.get('orderId')
+                        if shipday_order_id and activity_id:
+                            order_cache.store(str(shipday_order_id), activity_id)
                         return result
                     else:
                         print(f"[Shipday] API returned success=false: {result}")
@@ -264,15 +276,12 @@ class AVSShipdayIntegration:
             Response from AVS API
         """
         try:
-            # Construct AVS response payload wrapped in 'request' as required by AVS API
+            # Construct AVS response payload
             avs_response = self._build_avs_response(activity_id, shipday_order_data, verification_details)
 
-            # The AVS API expects the payload wrapped in a 'request' object
             avs_payload = {
-                "request": {
-                    "vendorId": self.avs_vendor_id,
-                    "addressVerificationResponses": [avs_response]
-                }
+                "vendorId": self.avs_vendor_id,
+                "addressVerificationResponses": [avs_response]
             }
 
             # Prepare headers
@@ -351,32 +360,27 @@ class AVSShipdayIntegration:
                     "contentBase64": photo.get('base64Content', ''),
                     "contentType": photo.get('contentType', 'image/jpeg'),
                     "mediaType": MediaType.IMAGE.value,
-                    "caption": photo.get('caption', 'Address verification photo'),
-                    "takenAt": photo.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
-                    "latitude": photo.get('latitude', ''),
-                    "longitude": photo.get('longitude', '')
+                    "latitude": float(photo.get('latitude', 0) or 0),
+                    "longitude": float(photo.get('longitude', 0) or 0)
                 })
 
-        # Parse customer name into first and last name
-        customer_name = verification_details.get('customerName', '')
-        first_name, last_name = self._parse_name(customer_name)
+        # AVS requires at least one addressMedia item — add placeholder if none
+        if not address_media:
+            # 10x10 white PNG as placeholder (AVS rejects 1x1 JPEG as "Invalid media data")
+            address_media.append({
+                "fileName": "no_photo_available.png",
+                "contentBase64": "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEElEQVR4nGP4jxcwjEpjAwD6Hirkl4HYkQAAAABJRU5ErkJggg==",
+                "contentType": "image/png",
+                "mediaType": MediaType.IMAGE.value,
+                "latitude": 0.0,
+                "longitude": 0.0
+            })
 
-        # Parse address into components
-        address = verification_details.get('address', '')
-        address_parts = self._parse_address(address)
-
-        # Build response object using camelCase
+        # Build response object with only the 16 required fields
         response = {
             "activityId": activity_id,
-            "customerName": customer_name,
-            "customer_reference": activity_id,
-            "subject_first_name": first_name,
-            "subject_last_name": last_name,
-            "address": address,
-            "address_street": address_parts['street'],
-            "address_city": address_parts['city'],
-            "address_state": address_parts['state'],
-            "address_country": address_parts['country'],
+            "customerName": verification_details.get('customerName', ''),
+            "address": verification_details.get('address', ''),
             "visitDate": verification_details.get('visitDate', datetime.utcnow().isoformat() + 'Z'),
             "addressExists": verification_details.get('addressExists', True),
             "isResidentialAddress": verification_details.get('isResidentialAddress', True),
@@ -386,12 +390,10 @@ class AVSShipdayIntegration:
             "nameOfPersonMet": verification_details.get('nameOfPersonMet', 'Name not given'),
             "easeOfLocation": verification_details.get('easeOfLocation', 'Medium'),
             "comments": verification_details.get('comments', ''),
-            "additionalComments": verification_details.get('additionalComments', ''),
             "receivedDate": datetime.utcnow().isoformat() + 'Z',
-            "metOthers": verification_details.get('metOthers', False),
             "verificationStatus": verification_details.get('verificationStatus', VerificationStatus.SUCCESS.value),
             "addressMedia": address_media,
-            "reportUrl": verification_details.get('reportUrl', '')
+            "reportUrl": verification_details.get('reportUrl') or "https://avs-shipday-production.onrender.com"
         }
 
         return response
@@ -560,6 +562,30 @@ class AVSShipdayIntegration:
     # ==================== UTILITY METHODS ====================
 
     @staticmethod
+    def download_image_to_base64(image_url: str) -> tuple:
+        """
+        Download an image from a URL and convert to base64.
+
+        Args:
+            image_url: URL of the image to download
+
+        Returns:
+            Tuple of (base64_string, content_type) or ("", "") on failure
+        """
+        try:
+            response = requests.get(image_url, timeout=30)
+            if response.status_code == 200:
+                base64_content = base64.b64encode(response.content).decode('utf-8')
+                content_type = response.headers.get('Content-Type', 'image/jpeg')
+                return (base64_content, content_type)
+            else:
+                print(f"[Image] Failed to download {image_url}: HTTP {response.status_code}")
+                return ("", "")
+        except Exception as e:
+            print(f"[Image] Error downloading {image_url}: {str(e)}")
+            return ("", "")
+
+    @staticmethod
     def encode_image_to_base64(image_path: str) -> str:
         """
         Encode image file to base64 string
@@ -615,8 +641,8 @@ class AVSShipdayIntegration:
                 'relationshipWithPersonMet': 50,
                 'nameOfPersonMet': 150,
                 'easeOfLocation': 100,
+                'comments': None,
                 'receivedDate': None,
-                'metOthers': None,
                 'verificationStatus': None,
                 'addressMedia': None,
                 'reportUrl': None
