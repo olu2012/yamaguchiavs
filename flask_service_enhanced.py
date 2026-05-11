@@ -9,6 +9,8 @@ import logging
 import hmac
 import threading
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -177,6 +179,12 @@ def handle_exception(e):
 # Initialize integration lazily
 _integration: Optional[AVSShipdayIntegration] = None
 
+# Bulk-submit job tracking
+_batch_jobs: Dict[str, Dict] = {}
+_batch_lock = threading.Lock()
+_batch_executor = ThreadPoolExecutor(max_workers=4)
+BULK_SUBMIT_MAX = 1000
+
 
 def get_integration() -> AVSShipdayIntegration:
     """Get or create the AVS-Shipday integration instance."""
@@ -245,6 +253,8 @@ def root():
             "avs_webhook": "/api/v1/avs/webhook",
             "submit_verification": "/api/v1/avs/submit-verification",
             "vendor_submit": "/vendor/address-verification/submit",
+            "vendor_bulk_submit": "/vendor/address-verification/bulk-submit",
+            "vendor_bulk_status": "/vendor/address-verification/bulk-submit/<batch_id>",
             "check_status": "/vendor/address-verification/status/<reference>",
             "get_order": "/api/v1/orders/<order_id>",
             "list_orders": "/api/v1/orders",
@@ -1643,6 +1653,230 @@ def handle_order_delete(data: Dict) -> Dict:
         "avs_submitted": avs_result.get("success", False),
         "avs_status_code": avs_result.get("status_code")
     }
+
+
+# ==================== BULK SUBMIT ENDPOINTS ====================
+
+def _process_bulk_job(batch_id: str, addresses: list) -> None:
+    """Background worker: creates a Shipday order for each address in the batch."""
+    with _batch_lock:
+        _batch_jobs[batch_id]["status"] = "processing"
+
+    results = []
+    for idx, address in enumerate(addresses):
+        try:
+            integration = get_integration()
+            result = integration.handle_avs_request(address)
+            results.append({
+                "index": idx,
+                "customer_reference": address.get("customer_reference"),
+                "status": result.get("status"),
+                "requestId": result.get("requestId"),
+                "message": result.get("message"),
+                "createdTasks": result.get("createdTasks", [])
+            })
+        except Exception as e:
+            logger.error(f"[Bulk] Error processing index {idx} ({address.get('customer_reference')}): {e}")
+            results.append({
+                "index": idx,
+                "customer_reference": address.get("customer_reference"),
+                "status": "error",
+                "message": str(e)
+            })
+
+    succeeded = sum(1 for r in results if r.get("status") == "success")
+    with _batch_lock:
+        _batch_jobs[batch_id].update({
+            "status": "completed",
+            "completed_at": datetime.utcnow().isoformat(),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "results": results
+        })
+    logger.info(f"[Bulk] Batch {batch_id} done — {succeeded}/{len(results)} succeeded")
+
+
+@app.route("/vendor/address-verification/bulk-submit", methods=["POST"])
+@require_api_key
+def bulk_address_verification_submit():
+    """Submit a batch of address verification requests (up to 1000 per call).
+
+    Processing happens asynchronously. The response returns immediately with a
+    batch_id; poll the status endpoint to track progress.
+    ---
+    tags:
+      - AVS Integration
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - addresses
+          properties:
+            addresses:
+              type: array
+              minItems: 1
+              maxItems: 1000
+              description: List of address verification requests (same fields as single submit)
+              items:
+                type: object
+                required:
+                  - customer_reference
+                properties:
+                  customer_reference:
+                    type: string
+                    example: "CUST-20260202-001"
+                  verification_type:
+                    type: string
+                    example: "AddressVerification"
+                  subject_first_name:
+                    type: string
+                  subject_last_name:
+                    type: string
+                  address_street:
+                    type: string
+                  address_city:
+                    type: string
+                  address_state:
+                    type: string
+                  address_lga:
+                    type: string
+                  address_landmark:
+                    type: string
+                  address_postal_code:
+                    type: string
+                  address_country:
+                    type: string
+    responses:
+      202:
+        description: Batch accepted and queued for processing
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            batch_id:
+              type: string
+              example: "550e8400-e29b-41d4-a716-446655440000"
+            total:
+              type: integer
+              example: 500
+            status:
+              type: string
+              example: queued
+            status_url:
+              type: string
+              example: "/vendor/address-verification/bulk-submit/550e8400-e29b-41d4-a716-446655440000"
+      400:
+        description: Validation error
+      401:
+        description: Unauthorized
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Request body is required"}), 400
+
+    addresses = data.get("addresses")
+    if not isinstance(addresses, list) or len(addresses) == 0:
+        return jsonify({"success": False, "message": "'addresses' must be a non-empty array"}), 400
+
+    if len(addresses) > BULK_SUBMIT_MAX:
+        return jsonify({
+            "success": False,
+            "message": f"Batch size {len(addresses)} exceeds the maximum of {BULK_SUBMIT_MAX} addresses per request"
+        }), 400
+
+    for idx, addr in enumerate(addresses):
+        if not addr.get("customer_reference"):
+            return jsonify({
+                "success": False,
+                "message": f"Item at index {idx} is missing required field 'customer_reference'"
+            }), 400
+
+    batch_id = str(uuid.uuid4())
+    with _batch_lock:
+        _batch_jobs[batch_id] = {
+            "batch_id": batch_id,
+            "status": "queued",
+            "total": len(addresses),
+            "submitted_at": datetime.utcnow().isoformat(),
+            "succeeded": 0,
+            "failed": 0,
+            "results": []
+        }
+
+    _batch_executor.submit(_process_bulk_job, batch_id, addresses)
+    logger.info(f"[Bulk] Batch {batch_id} queued with {len(addresses)} addresses")
+
+    return jsonify({
+        "success": True,
+        "batch_id": batch_id,
+        "total": len(addresses),
+        "status": "queued",
+        "message": f"Batch of {len(addresses)} addresses queued for processing",
+        "status_url": f"/vendor/address-verification/bulk-submit/{batch_id}"
+    }), 202
+
+
+@app.route("/vendor/address-verification/bulk-submit/<batch_id>", methods=["GET"])
+@require_api_key
+def bulk_submit_status(batch_id: str):
+    """Check the status of a bulk submission batch.
+    ---
+    tags:
+      - AVS Integration
+    security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: batch_id
+        type: string
+        required: true
+        description: The batch_id returned by the bulk-submit endpoint
+    responses:
+      200:
+        description: Batch status
+        schema:
+          type: object
+          properties:
+            batch_id:
+              type: string
+            status:
+              type: string
+              enum: [queued, processing, completed]
+            total:
+              type: integer
+            succeeded:
+              type: integer
+            failed:
+              type: integer
+            submitted_at:
+              type: string
+            completed_at:
+              type: string
+            results:
+              type: array
+              items:
+                type: object
+      404:
+        description: Batch not found
+      401:
+        description: Unauthorized
+    """
+    with _batch_lock:
+        job = _batch_jobs.get(batch_id)
+
+    if not job:
+        return jsonify({"found": False, "message": "Batch not found"}), 404
+
+    return jsonify(job), 200
 
 
 # ==================== UTILITY ENDPOINTS ====================
