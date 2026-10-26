@@ -12,7 +12,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
 from flask import Flask, request, jsonify
@@ -938,7 +938,7 @@ def get_order(order_id: str):
         name: order_id
         type: string
         required: true
-        description: The Shipday order ID
+        description: Shipday order number (AVS activityId) or numeric Shipday order ID
     responses:
       200:
         description: Order details
@@ -946,26 +946,63 @@ def get_order(order_id: str):
         description: Unauthorized
       404:
         description: Order not found
+      429:
+        description: Shipday rate limit hit — retry shortly
       500:
         description: Configuration error
+      502:
+        description: Shipday returned an unexpected error
     """
     try:
         integration = get_integration()
-        order_data = integration.get_shipday_order(order_id)
 
-        if order_data:
+        # Shipday looks orders up by order number; translate numeric IDs via our cache
+        order_ref = order_id
+        if order_id.isdigit():
+            order_ref = order_cache.lookup(order_id) or order_id
+
+        status_code, order_data = integration.fetch_shipday_order(order_ref)
+
+        if status_code == 200 and order_data:
             return jsonify(order_data)
-        else:
-            return jsonify({"error": "Not Found", "message": "Order not found"}), 404
+        if status_code in (200, 404):
+            return jsonify({"error": "Not Found", "message": "Order not found", "order_ref": order_ref}), 404
+        return _shipday_error_response(status_code, order_data)
 
     except ValueError as e:
         return jsonify({"error": "Configuration Error", "message": str(e)}), 500
 
 
+def _shipday_error_response(status_code: int, body):
+    """Surface a Shipday failure instead of masking it as an empty/404 result."""
+    if status_code == 429:
+        return jsonify({
+            "error": "Rate Limited",
+            "message": "Shipday rate limit hit — retry in a few seconds",
+            "shipday_status": 429
+        }), 429
+    return jsonify({
+        "error": "Shipday Error",
+        "message": "Shipday request failed" if status_code else "Could not reach Shipday",
+        "shipday_status": status_code or None,
+        "shipday_response": body
+    }), 502
+
+
+def _to_shipday_time(value: str, end_of_day: bool = False) -> str:
+    """Normalise YYYY-MM-DD or ISO-8601 input to Shipday's UTC format."""
+    if len(value) == 10:
+        return f"{value}T23:59:59Z" if end_of_day else f"{value}T00:00:00Z"
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 @app.route("/api/v1/orders", methods=["GET"])
 @require_api_key
 def list_orders():
-    """List completed orders from Shipday.
+    """List Shipday orders placed within a date range.
     ---
     tags:
       - Orders
@@ -976,28 +1013,73 @@ def list_orders():
       - in: query
         name: start_date
         type: string
-        description: Start date in ISO format
+        description: Start date (YYYY-MM-DD or ISO-8601 UTC). Defaults to 24 hours ago
       - in: query
         name: end_date
         type: string
-        description: End date in ISO format
+        description: End date (YYYY-MM-DD or ISO-8601 UTC). Defaults to now
+      - in: query
+        name: status
+        type: string
+        description: >
+          Optional Shipday order status filter, e.g. NOT_ASSIGNED, STARTED,
+          ALREADY_DELIVERED, FAILED_DELIVERY. "completed" is accepted as ALREADY_DELIVERED
+      - in: query
+        name: limit
+        type: integer
+        description: Max orders to return (1-1000, default 100)
+      - in: query
+        name: offset
+        type: integer
+        description: Number of orders to skip (default 0)
     responses:
       200:
-        description: List of completed orders
+        description: List of orders
+      400:
+        description: Invalid parameters
       401:
         description: Unauthorized
+      429:
+        description: Shipday rate limit hit — retry shortly
       500:
         description: Configuration error
+      502:
+        description: Shipday returned an unexpected error
     """
-    start_date = request.args.get("start_date")
-    end_date = request.args.get("end_date")
+    now = datetime.utcnow()
+    try:
+        start_time = _to_shipday_time(request.args["start_date"]) if request.args.get("start_date") \
+            else (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_time = _to_shipday_time(request.args["end_date"], end_of_day=True) if request.args.get("end_date") \
+            else now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        limit = int(request.args.get("limit", 100))
+        offset = int(request.args.get("offset", 0))
+    except ValueError as e:
+        return jsonify({"error": "Bad Request", "message": f"Invalid parameter: {e}"}), 400
+
+    if not 1 <= limit <= 1000 or offset < 0:
+        return jsonify({"error": "Bad Request", "message": "limit must be 1-1000 and offset >= 0"}), 400
+
+    status = (request.args.get("status") or "").strip().upper() or None
+    if status == "COMPLETED":
+        status = "ALREADY_DELIVERED"
 
     try:
         integration = get_integration()
-        orders = integration.list_completed_orders(start_date, end_date)
+        status_code, orders = integration.query_shipday_orders(
+            start_time, end_time, status,
+            start_cursor=offset + 1, end_cursor=offset + limit
+        )
+
+        if status_code != 200 or not isinstance(orders, list):
+            return _shipday_error_response(status_code, orders)
 
         return jsonify({
             "success": True,
+            "start_time": start_time,
+            "end_time": end_time,
+            "status": status,
+            "offset": offset,
             "count": len(orders),
             "orders": orders
         })

@@ -486,47 +486,76 @@ class AVSShipdayIntegration:
 
     # ==================== SHIPDAY API METHODS ====================
 
+    def fetch_shipday_order(self, order_ref: str) -> tuple:
+        """
+        Get order details from Shipday, keeping the upstream status code.
+
+        Shipday's GET /orders/{x} looks orders up by order number (our AVS
+        activityId UUID); numeric Shipday order IDs are not reliably found.
+
+        Args:
+            order_ref: Shipday order number
+
+        Returns:
+            (status_code, data) — status_code is Shipday's HTTP status
+            (0 on network error); data is the parsed body or None
+        """
+        try:
+            headers = {
+                "Authorization": f"Basic {self.shipday_api_key}",
+                "Content-Type": "application/json"
+            }
+
+            response = requests.get(
+                f"{self.shipday_base_url}/orders/{order_ref}",
+                headers=headers,
+                timeout=30
+            )
+
+            if response.status_code != 200:
+                print(f"Error fetching Shipday order: {response.status_code}")
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+            return response.status_code, data
+
+        except Exception as e:
+            print(f"Exception fetching Shipday order: {str(e)}")
+            return 0, None
+
     def get_shipday_order(self, order_id: str) -> Optional[Dict]:
         """
         Get order details from Shipday
 
         Args:
-            order_id: Shipday order ID
+            order_id: Shipday order number
 
         Returns:
             Order details or None
         """
-        try:
-            headers = {
-                "Authorization": f"Basic {self.shipday_api_key}",
-                "Content-Type": "application/json"
-            }
+        status_code, data = self.fetch_shipday_order(order_id)
+        return data if status_code == 200 else None
 
-            response = requests.get(
-                f"{self.shipday_base_url}/orders/{order_id}",
-                headers=headers
-            )
-
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"Error fetching Shipday order: {response.status_code}")
-                return None
-
-        except Exception as e:
-            print(f"Exception fetching Shipday order: {str(e)}")
-            return None
-
-    def list_completed_orders(self, start_date: str = None, end_date: str = None) -> List[Dict]:
+    def query_shipday_orders(self, start_time: str, end_time: str,
+                             order_status: str = None,
+                             start_cursor: int = 1, end_cursor: int = 100) -> tuple:
         """
-        List completed orders from Shipday within date range
+        Query Shipday orders by placement time range (POST /orders/query).
+
+        Unlike GET /orders (active orders only, ignores filters), this covers
+        delivered/failed orders and respects the date range.
 
         Args:
-            start_date: Start date in ISO format
-            end_date: End date in ISO format
+            start_time: ISO-8601 UTC start, e.g. 2026-10-26T00:00:00Z
+            end_time: ISO-8601 UTC end
+            order_status: Optional Shipday status, e.g. ALREADY_DELIVERED
+            start_cursor: 1-based index of the first result
+            end_cursor: index of the last result
 
         Returns:
-            List of completed orders
+            (status_code, data) — status_code is Shipday's HTTP status
+            (0 on network error); data is the parsed body or None
         """
         try:
             headers = {
@@ -534,30 +563,33 @@ class AVSShipdayIntegration:
                 "Content-Type": "application/json"
             }
 
-            params = {
-                "status": "completed"
+            body = {
+                "startTime": start_time,
+                "endTime": end_time,
+                "startCursor": start_cursor,
+                "endCursor": end_cursor
             }
+            if order_status:
+                body["orderStatus"] = order_status
 
-            if start_date:
-                params["startDate"] = start_date
-            if end_date:
-                params["endDate"] = end_date
-
-            response = requests.get(
-                f"{self.shipday_base_url}/orders",
+            response = requests.post(
+                f"{self.shipday_base_url}/orders/query",
                 headers=headers,
-                params=params
+                json=body,
+                timeout=60
             )
 
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"Error listing orders: {response.status_code}")
-                return []
+            if response.status_code != 200:
+                print(f"Error querying orders: {response.status_code} {response.text[:300]}")
+            try:
+                data = response.json()
+            except ValueError:
+                data = response.text[:500] or None
+            return response.status_code, data
 
         except Exception as e:
-            print(f"Exception listing orders: {str(e)}")
-            return []
+            print(f"Exception querying orders: {str(e)}")
+            return 0, None
 
     # ==================== UTILITY METHODS ====================
 
