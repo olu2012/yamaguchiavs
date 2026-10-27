@@ -102,6 +102,10 @@ AVS_SUBSCRIPTION_KEY = os.getenv("AVS_SUBSCRIPTION_KEY")
 AVS_BASE_URL = os.getenv("AVS_BASE_URL", "https://alat-dev-apim.azure-api.net/customops")
 SHIPDAY_WEBHOOK_SECRET = os.getenv("SHIPDAY_WEBHOOK_SECRET")
 
+# Feedback comments sent to AVS with verification results
+AVS_SUCCESS_COMMENT = "Address exists and customer resides"
+AVS_FAILURE_COMMENT = "Address doesn't exist"
+
 
 def require_api_key(f):
     """Decorator to require API key authentication."""
@@ -1387,7 +1391,7 @@ def handle_order_delivered(data: Dict) -> Dict:
     threading.Thread(
         target=_process_and_submit_to_avs,
         args=(order_id, activity_id, delivery, visit_date, tracking_url,
-              delivery_note or "Verification completed - order delivered successfully",
+              AVS_SUCCESS_COMMENT,
               VerificationStatus.SUCCESS.value, 60),
         daemon=True
     ).start()
@@ -1449,9 +1453,7 @@ def handle_order_failed(data: Dict) -> Dict:
         logger.error(f"Error processing POD photos: {e}")
         integration = get_integration()
 
-    # Build failure comments
-    failure_reason = delivery_note or order_status or "Order failed"
-    comments = f"Verification failed - {failure_reason}"
+    comments = AVS_FAILURE_COMMENT
 
     # Build verification details
     verification_details = {
@@ -1518,7 +1520,7 @@ def handle_order_completed(data: Dict) -> Dict:
     threading.Thread(
         target=_process_and_submit_to_avs,
         args=(order_id, activity_id, delivery, visit_date, tracking_url,
-              delivery_note or "Verification completed - order completed successfully",
+              AVS_SUCCESS_COMMENT,
               VerificationStatus.SUCCESS.value, 60),
         daemon=True
     ).start()
@@ -1580,9 +1582,7 @@ def handle_order_incomplete(data: Dict) -> Dict:
         logger.error(f"Error processing POD photos: {e}")
         integration = get_integration()
 
-    # Build failure comments
-    failure_reason = delivery_note or order_status or "Order incomplete"
-    comments = f"Verification incomplete - {failure_reason}"
+    comments = AVS_FAILURE_COMMENT
 
     # Build verification details - incomplete = failed verification
     verification_details = {
@@ -2188,7 +2188,7 @@ def refire_orders():
                 "address": address,
                 "visitDate": datetime.utcnow().isoformat() + 'Z',
                 "verificationStatus": VerificationStatus.SUCCESS.value,
-                "comments": "Verification completed - refire with POD photos",
+                "comments": AVS_SUCCESS_COMMENT,
                 "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
                 "addressExists": True,
                 "isResidentialAddress": True,
@@ -2283,7 +2283,7 @@ def refire_all():
                     "address": address,
                     "visitDate": datetime.utcnow().isoformat() + 'Z',
                     "verificationStatus": VerificationStatus.SUCCESS.value,
-                    "comments": "Verification completed - refire with POD photos",
+                    "comments": AVS_SUCCESS_COMMENT,
                     "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
                     "addressExists": True,
                     "isResidentialAddress": True,
