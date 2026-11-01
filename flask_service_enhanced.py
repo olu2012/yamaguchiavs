@@ -1219,6 +1219,7 @@ def handle_status_change(data: Dict) -> Dict:
         verification_details = {
             "customerName": delivery.get("name", ""),
             "address": delivery.get("address", ""),
+            "phone": delivery.get("phone") or delivery.get("phoneNumber") or "",
             "visitDate": visit_date,
             "verificationStatus": VerificationStatus.RETURNED.value,
             "comments": f"Verification returned - order status set to Pending",
@@ -1324,11 +1325,13 @@ def _process_and_submit_to_avs(order_id, activity_id, delivery, visit_date,
         # Fetch fresh order data using order_number (UUID = activity_id) — Shipday returns
         # 404 for numeric IDs on completed orders, but UUID order numbers work fine.
         photos = []
+        phone = delivery.get("phone") or delivery.get("phoneNumber") or ""
         raw = integration.get_shipday_order(str(activity_id))
         if raw:
             # Shipday returns a list when queried by order number
             fresh_order = raw[0] if isinstance(raw, list) and raw else raw
             photos = _extract_pod_photos_from_shipday_order(fresh_order)
+            phone = phone or (fresh_order.get("customer") or {}).get("phoneNumber") or ""
             logger.info(f"[Phase 2] Fetched order {order_id} from Shipday API — {len(photos)} photo(s) downloaded")
         else:
             logger.warning(f"[Phase 2] Could not fetch order {order_id} from Shipday API — proceeding without photos")
@@ -1336,6 +1339,7 @@ def _process_and_submit_to_avs(order_id, activity_id, delivery, visit_date,
         verification_details = {
             "customerName": delivery.get("name", ""),
             "address": delivery.get("address", ""),
+            "phone": phone,
             "visitDate": visit_date,
             "verificationStatus": verification_status,
             "comments": comments,
@@ -1459,6 +1463,7 @@ def handle_order_failed(data: Dict) -> Dict:
     verification_details = {
         "customerName": delivery.get("name", ""),
         "address": delivery.get("address", ""),
+        "phone": delivery.get("phone") or delivery.get("phoneNumber") or "",
         "visitDate": visit_date,
         "verificationStatus": VerificationStatus.FAILED.value,
         "comments": comments,
@@ -1588,6 +1593,7 @@ def handle_order_incomplete(data: Dict) -> Dict:
     verification_details = {
         "customerName": delivery.get("name", ""),
         "address": delivery.get("address", ""),
+        "phone": delivery.get("phone") or delivery.get("phoneNumber") or "",
         "visitDate": visit_date,
         "verificationStatus": VerificationStatus.FAILED.value,
         "comments": comments,
@@ -1703,6 +1709,7 @@ def handle_order_delete(data: Dict) -> Dict:
     verification_details = {
         "customerName": delivery.get("name", ""),
         "address": delivery.get("address", ""),
+        "phone": delivery.get("phone") or delivery.get("phoneNumber") or "",
         "visitDate": visit_date,
         "verificationStatus": VerificationStatus.RETURNED.value,
         "comments": comments,
@@ -2112,6 +2119,16 @@ def get_verification_statuses():
     })
 
 
+def _fetch_shipday_order_with_retry(integration, order_number: str, attempts: int = 4):
+    """Fetch a Shipday order by order number, backing off on 429 rate limits."""
+    for attempt in range(attempts):
+        status_code, data = integration.fetch_shipday_order(order_number)
+        if status_code != 429:
+            return data if status_code == 200 else None
+        time.sleep(2 ** (attempt + 1))
+    return None
+
+
 @app.route("/api/v1/admin/refire-orders", methods=["POST"])
 @require_api_key
 def refire_orders():
@@ -2139,6 +2156,18 @@ def refire_orders():
                     type: integer
                   activity_id:
                     type: string
+                  status:
+                    type: string
+                    enum: [success, failed]
+                    description: Overrides the top-level status for this order
+            status:
+              type: string
+              enum: [success, failed]
+              default: success
+              description: Result to send to AVS for every order
+            dry_run:
+              type: boolean
+              default: false
     responses:
       200:
         description: Refire results per order
@@ -2146,6 +2175,7 @@ def refire_orders():
     data = request.get_json() or {}
     orders = data.get("orders", [])
     dry_run = data.get("dry_run", False)
+    default_status = data.get("status", "success")
 
     if not orders:
         return jsonify({"error": "No orders provided"}), 400
@@ -2156,17 +2186,26 @@ def refire_orders():
         return jsonify({"error": str(e)}), 500
 
     results = []
-    for item in orders:
+    for idx, item in enumerate(orders):
         order_id = item.get("order_id")
         activity_id = item.get("activity_id")
+        status = item.get("status", default_status)
 
         if not order_id or not activity_id:
             results.append({"order_id": order_id, "activity_id": activity_id, "error": "Missing order_id or activity_id"})
             continue
 
+        if status not in ("success", "failed"):
+            results.append({"order_id": order_id, "activity_id": activity_id, "error": f"Invalid status '{status}' (use 'success' or 'failed')"})
+            continue
+
+        # Space out Shipday lookups — Shipday returns 429 after ~15 rapid requests
+        if idx:
+            time.sleep(1)
+
         try:
             # Fetch using order_number UUID (= activity_id) — numeric IDs return 404 for completed orders
-            raw = integration.get_shipday_order(str(activity_id))
+            raw = _fetch_shipday_order_with_retry(integration, str(activity_id))
             if not raw:
                 results.append({"order_id": order_id, "activity_id": activity_id, "error": "Could not fetch order from Shipday"})
                 continue
@@ -2181,24 +2220,45 @@ def refire_orders():
             customer = fresh_order.get("customer") or {}
             customer_name = customer.get("name") or ""
             address = customer.get("address") or ""
+            customer_phone = customer.get("phoneNumber") or customer.get("phone") or ""
             tracking_url = fresh_order.get("trackingLink") or fresh_order.get("trackingUrl") or ""
 
-            verification_details = {
-                "customerName": customer_name,
-                "address": address,
-                "visitDate": datetime.utcnow().isoformat() + 'Z',
-                "verificationStatus": VerificationStatus.SUCCESS.value,
-                "comments": AVS_SUCCESS_COMMENT,
-                "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
-                "addressExists": True,
-                "isResidentialAddress": True,
-                "isCustomerResidence": True,
-                "isCustomerKnown": True,
-                "relationshipWithPersonMet": "Self",
-                "nameOfPersonMet": customer_name or "Not specified",
-                "easeOfLocation": "Medium",
-                "photos": photos
-            }
+            if status == "failed":
+                verification_details = {
+                    "customerName": customer_name,
+                    "address": address,
+                    "phone": customer_phone,
+                    "visitDate": datetime.utcnow().isoformat() + 'Z',
+                    "verificationStatus": VerificationStatus.FAILED.value,
+                    "comments": AVS_FAILURE_COMMENT,
+                    "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
+                    "addressExists": False,
+                    "isResidentialAddress": False,
+                    "isCustomerResidence": False,
+                    "isCustomerKnown": False,
+                    "relationshipWithPersonMet": "Not applicable",
+                    "nameOfPersonMet": "Not applicable",
+                    "easeOfLocation": "Hard",
+                    "photos": photos
+                }
+            else:
+                verification_details = {
+                    "customerName": customer_name,
+                    "address": address,
+                    "phone": customer_phone,
+                    "visitDate": datetime.utcnow().isoformat() + 'Z',
+                    "verificationStatus": VerificationStatus.SUCCESS.value,
+                    "comments": AVS_SUCCESS_COMMENT,
+                    "reportUrl": tracking_url or "https://avs-shipday-production.onrender.com",
+                    "addressExists": True,
+                    "isResidentialAddress": True,
+                    "isCustomerResidence": True,
+                    "isCustomerKnown": True,
+                    "relationshipWithPersonMet": "Self",
+                    "nameOfPersonMet": customer_name or "Not specified",
+                    "easeOfLocation": "Medium",
+                    "photos": photos
+                }
 
             if dry_run:
                 # Build the payload but do not submit — return it in full
@@ -2210,6 +2270,7 @@ def refire_orders():
                 results.append({
                     "order_id": order_id,
                     "activity_id": activity_id,
+                    "status": status,
                     "pod_count": len(photos),
                     "dry_run": True,
                     "avs_payload": avs_payload
@@ -2227,6 +2288,7 @@ def refire_orders():
             results.append({
                 "order_id": order_id,
                 "activity_id": activity_id,
+                "status": status,
                 "pod_count": len(photos),
                 "avs_success": avs_result.get("success"),
                 "avs_status_code": avs_result.get("status_code"),
@@ -2274,6 +2336,7 @@ def refire_all():
             customer = fresh_order.get("customer") or {}
             customer_name = customer.get("name") or ""
             address = customer.get("address") or ""
+            customer_phone = customer.get("phoneNumber") or customer.get("phone") or ""
             tracking_url = fresh_order.get("trackingLink") or fresh_order.get("trackingUrl") or ""
 
             # Orders with no POD photos are still pending in Shipday — submit as RETURNED
@@ -2281,6 +2344,7 @@ def refire_all():
                 verification_details = {
                     "customerName": customer_name,
                     "address": address,
+                    "phone": customer_phone,
                     "visitDate": datetime.utcnow().isoformat() + 'Z',
                     "verificationStatus": VerificationStatus.SUCCESS.value,
                     "comments": AVS_SUCCESS_COMMENT,
@@ -2298,6 +2362,7 @@ def refire_all():
                 verification_details = {
                     "customerName": customer_name,
                     "address": address,
+                    "phone": customer_phone,
                     "visitDate": datetime.utcnow().isoformat() + 'Z',
                     "verificationStatus": VerificationStatus.RETURNED.value,
                     "comments": "Verification returned - order still pending in Shipday",
