@@ -9,7 +9,10 @@ import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 from enum import Enum
+import logging
 import order_cache
+
+logger = logging.getLogger(__name__)
 
 
 class VerificationStatus(Enum):
@@ -71,6 +74,11 @@ class AVSShipdayIntegration:
             # Detect payload format
             if 'customer_reference' in request_data:
                 # New AVS format - single verification request
+                # Record exactly what AVS sends in subject_phone (repr shows missing/empty/whitespace)
+                logger.info(
+                    f"AVS_REQUEST customer_reference={request_data.get('customer_reference')} "
+                    f"subject_phone={request_data.get('subject_phone', '<missing>')!r}"
+                )
                 verification_request = self._normalize_avs_payload(request_data)
                 verification_requests = [verification_request]
                 activity_id = verification_request.get('activityId')
