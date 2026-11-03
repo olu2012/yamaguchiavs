@@ -344,23 +344,6 @@ class AVSShipdayIntegration:
                 "message": f"Exception submitting result: {str(e)}"
             }
 
-    # Default phone used in Phase 1 when AVS sends none — never report it back
-    PLACEHOLDER_PHONE = '08000000000'
-    AVS_ADDRESS_MAX = 300
-
-    @classmethod
-    def _address_with_phone(cls, address: str, phone: str) -> str:
-        """AVS has no phone field, so append the customer phone to the address.
-        Keeps the result within AVS's 300-char address limit by trimming the address."""
-        address = (address or '').strip()
-        phone = (phone or '').strip()
-        if not phone or phone == cls.PLACEHOLDER_PHONE or phone in address:
-            return address[:cls.AVS_ADDRESS_MAX]
-        suffix = f" | Phone: {phone}"
-        if not address:
-            return suffix[3:][:cls.AVS_ADDRESS_MAX]
-        return address[:cls.AVS_ADDRESS_MAX - len(suffix)] + suffix
-
     def _build_avs_response(self,
                            activity_id: str,
                            shipday_data: Dict,
@@ -405,8 +388,7 @@ class AVSShipdayIntegration:
         response = {
             "activityId": activity_id,
             "customerName": verification_details.get('customerName', ''),
-            "address": self._address_with_phone(verification_details.get('address', ''),
-                                                verification_details.get('phone', '')),
+            "address": verification_details.get('address', ''),
             "visitDate": verification_details.get('visitDate', datetime.utcnow().isoformat() + 'Z'),
             "addressExists": verification_details.get('addressExists', True),
             "isResidentialAddress": verification_details.get('isResidentialAddress', True),
