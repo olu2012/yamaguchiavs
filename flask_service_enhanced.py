@@ -2292,6 +2292,35 @@ def refire_orders():
     return jsonify({"results": results, "total": len(results)})
 
 
+@app.route("/api/v1/admin/recent-avs-requests", methods=["GET"])
+@require_api_key
+def recent_avs_requests():
+    """Return the most recent raw request bodies received from AVS (max 20 kept).
+    ---
+    tags:
+      - Admin
+    parameters:
+      - name: limit
+        in: query
+        type: integer
+        default: 5
+    responses:
+      200:
+        description: Newest raw AVS requests first
+    """
+    try:
+        limit = max(1, min(int(request.args.get("limit", 5)), order_cache.RAW_REQUEST_KEEP))
+    except ValueError:
+        limit = 5
+    rows = order_cache.recent_raw_requests(limit)
+    for row in rows:
+        try:
+            row["body"] = json.loads(row["body"])
+        except (TypeError, ValueError):
+            pass
+    return jsonify({"count": len(rows), "requests": rows})
+
+
 @app.route("/api/v1/admin/refire-all", methods=["POST"])
 @require_api_key
 def refire_all():

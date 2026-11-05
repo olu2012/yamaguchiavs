@@ -85,3 +85,54 @@ def lookup(shipday_order_id: str) -> str | None:
     except Exception as e:
         logger.error(f"[order_cache] Failed to lookup mapping: {e}")
         return None
+
+
+# --- Raw AVS request samples -------------------------------------------------
+# Keeps the most recent incoming AVS request bodies so we can inspect exactly
+# which fields AVS sends. Stored on disk (not in memory) because gunicorn runs
+# multiple workers. Capped at RAW_REQUEST_KEEP rows.
+RAW_REQUEST_KEEP = 20
+
+
+def _raw_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_DB_PATH)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS avs_raw_requests ("
+        "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  reference   TEXT,"
+        "  body        TEXT NOT NULL,"
+        "  received_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    )
+    return conn
+
+
+def store_raw_request(reference: str, body: str) -> None:
+    """Save one raw AVS request body and prune to the newest RAW_REQUEST_KEEP."""
+    try:
+        with _raw_conn() as conn:
+            conn.execute(
+                "INSERT INTO avs_raw_requests (reference, body) VALUES (?, ?)",
+                (str(reference), body),
+            )
+            conn.execute(
+                "DELETE FROM avs_raw_requests WHERE id NOT IN "
+                "(SELECT id FROM avs_raw_requests ORDER BY id DESC LIMIT ?)",
+                (RAW_REQUEST_KEEP,),
+            )
+    except Exception as e:
+        logger.error(f"[order_cache] Failed to store raw AVS request: {e}")
+
+
+def recent_raw_requests(limit: int = 5) -> list:
+    """Return the newest raw AVS request bodies, newest first."""
+    try:
+        with _raw_conn() as conn:
+            rows = conn.execute(
+                "SELECT reference, body, received_at FROM avs_raw_requests ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [{"reference": r[0], "body": r[1], "received_at": r[2]} for r in rows]
+    except Exception as e:
+        logger.error(f"[order_cache] Failed to read raw AVS requests: {e}")
+        return []

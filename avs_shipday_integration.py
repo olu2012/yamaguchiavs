@@ -79,6 +79,9 @@ class AVSShipdayIntegration:
                     f"AVS_REQUEST customer_reference={request_data.get('customer_reference')} "
                     f"subject_phone={request_data.get('subject_phone', '<missing>')!r}"
                 )
+                # Keep the raw body (last 20) for GET /api/v1/admin/recent-avs-requests
+                order_cache.store_raw_request(request_data.get('customer_reference'),
+                                              json.dumps(request_data))
                 verification_request = self._normalize_avs_payload(request_data)
                 verification_requests = [verification_request]
                 activity_id = verification_request.get('activityId')
