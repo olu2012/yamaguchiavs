@@ -5,6 +5,7 @@ Handles bidirectional integration between Address Verification Service and Shipd
 
 import requests
 import json
+import re
 import base64
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -150,48 +151,66 @@ class AVSShipdayIntegration:
         Returns:
             Normalized verification request
         """
-        # Build customer name from subject fields
-        first_name = avs_data.get('subject_first_name', '')
-        middle_name = avs_data.get('subject_middle_name', '')
-        last_name = avs_data.get('subject_last_name', '')
+        # AVS field names vary in case (e.g. "Subject_phone" vs "subject_phone"),
+        # so look everything up case-insensitively.
+        fields = {str(k).lower(): v for k, v in avs_data.items()}
 
-        name_parts = [first_name, middle_name, last_name]
+        def field(*names) -> str:
+            for name in names:
+                value = fields.get(name.lower())
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+            return ''
+
+        # Build customer name from subject fields
+        name_parts = [field('subject_first_name'), field('subject_middle_name'), field('subject_last_name')]
         customer_name = ' '.join(part for part in name_parts if part).strip()
 
         # Build full address — use fullAddress directly if provided, else build from parts
-        full_address = avs_data.get('fullAddress', '').strip()
+        full_address = field('fullAddress', 'full_address')
         if not full_address:
-            address_parts = []
-            if avs_data.get('address_street'):
-                address_parts.append(avs_data['address_street'])
-            if avs_data.get('address_landmark'):
-                address_parts.append(avs_data['address_landmark'])
-            if avs_data.get('address_lga'):
-                address_parts.append(avs_data['address_lga'])
-            if avs_data.get('address_city'):
-                address_parts.append(avs_data['address_city'])
-            if avs_data.get('address_state'):
-                address_parts.append(avs_data['address_state'])
-            if avs_data.get('address_postal_code'):
-                address_parts.append(avs_data['address_postal_code'])
-            if avs_data.get('address_country'):
-                address_parts.append(avs_data['address_country'])
+            address_parts = [field(name) for name in (
+                'address_street', 'address_landmark', 'address_lga', 'address_city',
+                'address_state', 'address_postal_code', 'address_country')]
+            address_parts = [part for part in address_parts if part]
             full_address = ', '.join(address_parts) if address_parts else 'Address not provided'
 
-        # Get phone number
-        phone = avs_data.get('subject_phone', '08000000000')
+        # AVS sends the customer's CIF (e.g. "R014627256") in subject_phone, and the real
+        # phone number at the end of additional_information ("<notes> - <phone number>").
+        cif = field('subject_phone')
+        additional_info = field('additional_information', 'additionalInformation')
+        phone = self._extract_phone(additional_info) or self._extract_phone(cif) or self.PLACEHOLDER_PHONE
 
         return {
-            'activityId': avs_data.get('customer_reference', ''),
+            'activityId': field('customer_reference'),
             'customerName': customer_name or 'Unknown Customer',
             'address': full_address,
             'customerPhoneNumber': phone,
+            'cif': cif,
             'visitDate': datetime.utcnow().isoformat() + 'Z',
-            'additionalComments': avs_data.get('verification_type', 'AddressVerification'),
-            'additionalInformation': avs_data.get('additionalInformation', ''),
+            'additionalComments': field('verification_type') or 'AddressVerification',
+            'additionalInformation': additional_info,
             # Preserve original data for reference
             'originalPayload': avs_data
         }
+
+    # Used when AVS provides no usable phone number (Shipday requires one)
+    PLACEHOLDER_PHONE = '08000000000'
+
+    @staticmethod
+    def _extract_phone(text: str) -> str:
+        """Return the last phone-number-like value in text (10-14 digits, optional +,
+        spaces/dashes allowed inside), or '' if none. CIFs like R014627256 don't match."""
+        if not text:
+            return ''
+        # AVS separates notes from the phone number with " - "; check the last segment first
+        for segment in reversed(re.split(r'\s+-\s+', text)):
+            matches = re.findall(r'(?<![\w])\+?\d[\d\s-]{8,18}\d(?![\w])', segment)
+            for candidate in reversed(matches):
+                digits = re.sub(r'[\s-]', '', candidate)
+                if 10 <= len(digits.lstrip('+')) <= 14:
+                    return digits
+        return ''
 
     def _create_shipday_order(self, verification_request: Dict) -> Optional[Dict]:
         """
@@ -208,8 +227,9 @@ class AVSShipdayIntegration:
             customer_name = verification_request.get('customerName', '')
             address = verification_request.get('address', '')
             activity_id = verification_request.get('activityId', '')
-            phone = verification_request.get('customerPhoneNumber', '08000000000')
+            phone = verification_request.get('customerPhoneNumber') or self.PLACEHOLDER_PHONE
             additional_info = verification_request.get('additionalInformation', '')
+            cif = verification_request.get('cif', '')
 
             # Prepare Shipday order payload - minimal required fields
             shipday_payload = {
@@ -222,9 +242,11 @@ class AVSShipdayIntegration:
                 "restaurantPhoneNumber": "08000000000"
             }
 
-            # Include additional information as order notes if provided
-            if additional_info:
-                shipday_payload["orderDetails"] = additional_info
+            # Show AVS's additional information (which includes the customer's phone
+            # number) and the CIF to the driver as delivery instructions
+            instructions = [part for part in (additional_info, f"CIF: {cif}" if cif else '') if part]
+            if instructions:
+                shipday_payload["deliveryInstruction"] = ' | '.join(instructions)
 
             # Make API call to Shipday
             headers = {
